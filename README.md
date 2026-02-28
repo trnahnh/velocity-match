@@ -1,4 +1,4 @@
-# ferrox
+# Ferrox
 
 A low-latency order matching engine in Rust targeting **sub-50µs P99 latency** at **1M+ orders/second** with **zero heap allocation** on the hot path.
 
