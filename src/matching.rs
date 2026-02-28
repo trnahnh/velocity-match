@@ -36,15 +36,26 @@ impl From<BookError> for MatchingError {
         Self::Book(e)
     }
 }
+const FILLS_INITIAL_CAPACITY: usize = 16;
+
 #[derive(Debug)]
 pub struct MatchingEngine {
     book: OrderBook,
+    fills_buf: Vec<Fill>,
 }
 
 impl MatchingEngine {
     pub fn new() -> Self {
         Self {
             book: OrderBook::new(),
+            fills_buf: Vec::with_capacity(FILLS_INITIAL_CAPACITY),
+        }
+    }
+
+    pub fn with_capacity(arena_capacity: u32) -> Self {
+        Self {
+            book: OrderBook::with_capacity(arena_capacity),
+            fills_buf: Vec::with_capacity(FILLS_INITIAL_CAPACITY),
         }
     }
 
@@ -57,8 +68,12 @@ impl MatchingEngine {
             return Err(MatchingError::ZeroQuantity);
         }
 
+        if self.fills_buf.capacity() == 0 {
+            self.fills_buf.reserve(FILLS_INITIAL_CAPACITY);
+        }
+        self.fills_buf.clear();
+
         let order_id = order.id;
-        let mut fills = Vec::new();
         let mut self_trade = false;
 
         match order.side {
@@ -87,7 +102,7 @@ impl MatchingEngine {
                         self.book
                             .reduce_front_quantity(Side::Ask, best_ask, fill_qty)?;
 
-                    fills.push(Fill {
+                    self.fills_buf.push(Fill {
                         taker_order_id: order.id,
                         maker_order_id: maker_id,
                         price: fill_price,
@@ -123,7 +138,7 @@ impl MatchingEngine {
                         self.book
                             .reduce_front_quantity(Side::Bid, best_bid, fill_qty)?;
 
-                    fills.push(Fill {
+                    self.fills_buf.push(Fill {
                         taker_order_id: order.id,
                         maker_order_id: maker_id,
                         price: fill_price,
@@ -142,7 +157,7 @@ impl MatchingEngine {
             OrderStatus::FullyFilled
         } else {
             self.book.insert_order(order)?;
-            if fills.is_empty() {
+            if self.fills_buf.is_empty() {
                 OrderStatus::Resting
             } else {
                 OrderStatus::PartiallyFilled
@@ -152,7 +167,7 @@ impl MatchingEngine {
         Ok(AddOrderResult {
             order_id,
             status,
-            fills,
+            fills: std::mem::take(&mut self.fills_buf),
         })
     }
 
@@ -172,6 +187,12 @@ mod tests {
     use super::*;
     use crate::order::{Order, Side};
 
+    const TEST_CAPACITY: u32 = 1_024;
+
+    fn engine() -> MatchingEngine {
+        MatchingEngine::with_capacity(TEST_CAPACITY)
+    }
+
     fn bid(id: u64, price: i64, qty: u64, ts: u64) -> Order {
         Order::new(id, id, Side::Bid, price, qty, ts).unwrap()
     }
@@ -190,7 +211,7 @@ mod tests {
 
     #[test]
     fn no_match_resting() {
-        let mut engine = MatchingEngine::new();
+        let mut engine = engine();
 
         let result = engine.add_order(bid(1, 100, 10, 1)).unwrap();
         assert_eq!(result.status, OrderStatus::Resting);
@@ -207,7 +228,7 @@ mod tests {
 
     #[test]
     fn full_fill_equal_quantities() {
-        let mut engine = MatchingEngine::new();
+        let mut engine = engine();
         engine.add_order(ask(1, 100, 10, 1)).unwrap();
 
         let result = engine.add_order(bid(2, 100, 10, 2)).unwrap();
@@ -224,7 +245,7 @@ mod tests {
 
     #[test]
     fn partial_fill_taker_has_more() {
-        let mut engine = MatchingEngine::new();
+        let mut engine = engine();
         engine.add_order(ask(1, 100, 5, 1)).unwrap();
 
         let result = engine.add_order(bid(2, 100, 10, 2)).unwrap();
@@ -239,7 +260,7 @@ mod tests {
 
     #[test]
     fn partial_fill_maker_has_more() {
-        let mut engine = MatchingEngine::new();
+        let mut engine = engine();
         engine.add_order(bid(1, 100, 20, 1)).unwrap();
 
         let result = engine.add_order(ask(2, 100, 5, 2)).unwrap();
@@ -254,7 +275,7 @@ mod tests {
 
     #[test]
     fn multi_level_matching() {
-        let mut engine = MatchingEngine::new();
+        let mut engine = engine();
         engine.add_order(ask(1, 100, 5, 1)).unwrap();
         engine.add_order(ask(2, 101, 5, 2)).unwrap();
         engine.add_order(ask(3, 102, 5, 3)).unwrap();
@@ -277,7 +298,7 @@ mod tests {
 
     #[test]
     fn fifo_within_price_level() {
-        let mut engine = MatchingEngine::new();
+        let mut engine = engine();
         engine.add_order(ask(1, 100, 10, 1)).unwrap();
         engine.add_order(ask(2, 100, 10, 2)).unwrap();
         engine.add_order(ask(3, 100, 10, 3)).unwrap();
@@ -292,7 +313,7 @@ mod tests {
 
     #[test]
     fn fill_price_is_maker_price() {
-        let mut engine = MatchingEngine::new();
+        let mut engine = engine();
         engine.add_order(ask(1, 100, 10, 1)).unwrap();
 
         let result = engine.add_order(bid(2, 110, 10, 2)).unwrap();
@@ -301,7 +322,7 @@ mod tests {
 
     #[test]
     fn ask_taker_matches_bids() {
-        let mut engine = MatchingEngine::new();
+        let mut engine = engine();
         engine.add_order(bid(1, 102, 10, 1)).unwrap();
         engine.add_order(bid(2, 101, 10, 2)).unwrap();
 
@@ -319,7 +340,7 @@ mod tests {
 
     #[test]
     fn cancel_resting_order() {
-        let mut engine = MatchingEngine::new();
+        let mut engine = engine();
         engine.add_order(bid(1, 100, 10, 1)).unwrap();
 
         let cancelled = engine.cancel_order(1).unwrap();
@@ -329,14 +350,14 @@ mod tests {
 
     #[test]
     fn cancel_nonexistent_fails() {
-        let mut engine = MatchingEngine::new();
+        let mut engine = engine();
         let err = engine.cancel_order(999).unwrap_err();
         assert_eq!(err, MatchingError::Book(BookError::OrderNotFound(999)));
     }
 
     #[test]
     fn zero_quantity_rejected() {
-        let mut engine = MatchingEngine::new();
+        let mut engine = engine();
         let order = Order {
             id: 1,
             trader_id: 1,
@@ -351,7 +372,7 @@ mod tests {
 
     #[test]
     fn empty_book_no_match() {
-        let mut engine = MatchingEngine::new();
+        let mut engine = engine();
         let result = engine.add_order(bid(1, 100, 10, 1)).unwrap();
         assert_eq!(result.status, OrderStatus::Resting);
         assert!(result.fills.is_empty());
@@ -359,7 +380,7 @@ mod tests {
 
     #[test]
     fn bid_below_best_ask_no_match() {
-        let mut engine = MatchingEngine::new();
+        let mut engine = engine();
         engine.add_order(ask(1, 105, 10, 1)).unwrap();
 
         let result = engine.add_order(bid(2, 100, 10, 2)).unwrap();
@@ -370,7 +391,7 @@ mod tests {
 
     #[test]
     fn self_trade_prevented_cancel_newest() {
-        let mut engine = MatchingEngine::new();
+        let mut engine = engine();
         // Trader 1 rests an ask
         engine.add_order(ask_trader(1, 1, 100, 10, 1)).unwrap();
 
@@ -386,7 +407,7 @@ mod tests {
 
     #[test]
     fn self_trade_different_traders_allowed() {
-        let mut engine = MatchingEngine::new();
+        let mut engine = engine();
         // Trader 1 rests an ask
         engine.add_order(ask_trader(1, 1, 100, 10, 1)).unwrap();
 
@@ -400,7 +421,7 @@ mod tests {
 
     #[test]
     fn self_trade_partial_fill_then_cancel() {
-        let mut engine = MatchingEngine::new();
+        let mut engine = engine();
         // Trader A rests ask at 100
         engine.add_order(ask_trader(1, 10, 100, 5, 1)).unwrap();
         // Trader B (self) rests ask at 101
@@ -420,7 +441,7 @@ mod tests {
 
     #[test]
     fn self_trade_multiple_resting_same_trader() {
-        let mut engine = MatchingEngine::new();
+        let mut engine = engine();
         // Trader 1 rests two asks
         engine.add_order(ask_trader(1, 1, 100, 10, 1)).unwrap();
         engine.add_order(ask_trader(2, 1, 101, 10, 2)).unwrap();
@@ -441,6 +462,12 @@ mod proptests {
     use crate::order::{Order, Side};
     use proptest::prelude::*;
 
+    const TEST_CAPACITY: u32 = 1_024;
+
+    fn engine() -> MatchingEngine {
+        MatchingEngine::with_capacity(TEST_CAPACITY)
+    }
+
     fn arb_side() -> impl Strategy<Value = Side> {
         prop_oneof![Just(Side::Bid), Just(Side::Ask)]
     }
@@ -452,7 +479,7 @@ mod proptests {
             maker_qty in 1_u64..=1000,
             taker_qty in 1_u64..=1000,
         ) {
-            let mut engine = MatchingEngine::new();
+            let mut engine = engine();
             // Different trader_ids so STP doesn't trigger
             engine.add_order(Order::new(1, 1, Side::Ask, price, maker_qty, 1).unwrap()).unwrap();
 
@@ -476,7 +503,7 @@ mod proptests {
                 1..50,
             )
         ) {
-            let mut engine = MatchingEngine::new();
+            let mut engine = engine();
             for (i, (side, price, qty)) in orders.into_iter().enumerate() {
                 let id = (i + 1) as u64;
                 // Each order from a unique trader to avoid STP interference
@@ -495,7 +522,7 @@ mod proptests {
             maker_qty in 1_u64..=1000,
             taker_qty in 1_u64..=1000,
         ) {
-            let mut engine = MatchingEngine::new();
+            let mut engine = engine();
             // Different trader_ids so STP doesn't trigger
             engine.add_order(Order::new(1, 1, Side::Ask, price, maker_qty, 1).unwrap()).unwrap();
 
@@ -510,7 +537,7 @@ mod proptests {
                 1..50,
             )
         ) {
-            let mut engine = MatchingEngine::new();
+            let mut engine = engine();
             for (i, (side, price, qty)) in orders.into_iter().enumerate() {
                 let id = (i + 1) as u64;
                 // Each order from a unique trader
@@ -529,7 +556,7 @@ mod proptests {
             maker_qty in 1_u64..=100,
             taker_qty in 1_u64..=100,
         ) {
-            let mut engine = MatchingEngine::new();
+            let mut engine = engine();
             // Same trader_id on both sides
             engine.add_order(Order::new(1, 42, Side::Ask, price, maker_qty, 1).unwrap()).unwrap();
 
