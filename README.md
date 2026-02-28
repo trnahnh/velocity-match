@@ -8,7 +8,7 @@ A low-latency order matching engine in Rust targeting **sub-50µs P99 latency** 
                     ┌─────────────────────────────────────────────────┐
                     │                  Hot Path                       │
                     │                                                 │
-  NIC/Client ──►  [Binary Decoder] ──► [Ring Buffer] ──► [Matching   │ ──► [UDP Multicast]
+  NIC/Client ──►  [Binary Decoder] ──► [Ring Buffer] ──► [Matching    │ ──► [UDP Multicast]
                     │                     (SPSC)          Engine]     │     ExecutionReports
                     │                                       │         │
                     │                                       ▼         │
