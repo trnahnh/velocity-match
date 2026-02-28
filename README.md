@@ -76,7 +76,7 @@ The matching engine is fully deterministic: same input sequence always produces 
 
 | Phase | Focus | Status |
 | ----- | ----- | ------ |
-| 1 | Domain model + matching logic (`HashMap` + `VecDeque`, correctness first) | In progress |
+| 1 | Domain model + matching logic (`HashMap` + `VecDeque`, correctness first) | Done |
 | 2 | Performance data structures (arena, intrusive linked list, cache line padding) | Planned |
 | 3 | Lock-free SPSC ring buffer (`AtomicUsize`, `Acquire`/`Release` ordering) | Planned |
 | 4 | Binary protocol + UDP multicast (zero-copy codec, `socket2`) | Planned |
