@@ -15,6 +15,7 @@ pub enum OrderStatus {
     FullyFilled,
     PartiallyFilled,
     Resting,
+    CancelledSelfTrade,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +59,7 @@ impl MatchingEngine {
 
         let order_id = order.id;
         let mut fills = Vec::new();
+        let mut self_trade = false;
 
         match order.side {
             Side::Bid => {
@@ -71,6 +73,11 @@ impl MatchingEngine {
                         Some(m) => m,
                         None => break,
                     };
+
+                    if maker.trader_id == order.trader_id {
+                        self_trade = true;
+                        break;
+                    }
 
                     let fill_qty = order.quantity.min(maker.quantity);
                     let maker_id = maker.id;
@@ -103,6 +110,11 @@ impl MatchingEngine {
                         None => break,
                     };
 
+                    if maker.trader_id == order.trader_id {
+                        self_trade = true;
+                        break;
+                    }
+
                     let fill_qty = order.quantity.min(maker.quantity);
                     let maker_id = maker.id;
                     let fill_price = maker.price;
@@ -124,7 +136,9 @@ impl MatchingEngine {
             }
         }
 
-        let status = if order.quantity == 0 {
+        let status = if self_trade {
+            OrderStatus::CancelledSelfTrade
+        } else if order.quantity == 0 {
             OrderStatus::FullyFilled
         } else {
             self.book.insert_order(order)?;
@@ -164,6 +178,14 @@ mod tests {
 
     fn ask(id: u64, price: i64, qty: u64, ts: u64) -> Order {
         Order::new(id, id, Side::Ask, price, qty, ts).unwrap()
+    }
+
+    fn bid_trader(id: u64, trader_id: u64, price: i64, qty: u64, ts: u64) -> Order {
+        Order::new(id, trader_id, Side::Bid, price, qty, ts).unwrap()
+    }
+
+    fn ask_trader(id: u64, trader_id: u64, price: i64, qty: u64, ts: u64) -> Order {
+        Order::new(id, trader_id, Side::Ask, price, qty, ts).unwrap()
     }
 
     #[test]
@@ -345,6 +367,72 @@ mod tests {
         assert!(result.fills.is_empty());
         assert_eq!(engine.book().order_count(), 2);
     }
+
+    #[test]
+    fn self_trade_prevented_cancel_newest() {
+        let mut engine = MatchingEngine::new();
+        // Trader 1 rests an ask
+        engine.add_order(ask_trader(1, 1, 100, 10, 1)).unwrap();
+
+        // Same trader 1 sends a bid that would cross — taker cancelled
+        let result = engine.add_order(bid_trader(2, 1, 100, 10, 2)).unwrap();
+        assert_eq!(result.status, OrderStatus::CancelledSelfTrade);
+        assert!(result.fills.is_empty());
+
+        // Resting ask is untouched
+        assert_eq!(engine.book().order_count(), 1);
+        assert_eq!(engine.book().best_ask(), Some(100));
+    }
+
+    #[test]
+    fn self_trade_different_traders_allowed() {
+        let mut engine = MatchingEngine::new();
+        // Trader 1 rests an ask
+        engine.add_order(ask_trader(1, 1, 100, 10, 1)).unwrap();
+
+        // Trader 2 sends a bid — should fill normally
+        let result = engine.add_order(bid_trader(2, 2, 100, 10, 2)).unwrap();
+        assert_eq!(result.status, OrderStatus::FullyFilled);
+        assert_eq!(result.fills.len(), 1);
+        assert_eq!(result.fills[0].quantity, 10);
+        assert_eq!(engine.book().order_count(), 0);
+    }
+
+    #[test]
+    fn self_trade_partial_fill_then_cancel() {
+        let mut engine = MatchingEngine::new();
+        // Trader A rests ask at 100
+        engine.add_order(ask_trader(1, 10, 100, 5, 1)).unwrap();
+        // Trader B (self) rests ask at 101
+        engine.add_order(ask_trader(2, 20, 101, 10, 2)).unwrap();
+
+        // Trader B sends bid at 101 — fills against trader A, then hits own order
+        let result = engine.add_order(bid_trader(3, 20, 101, 15, 3)).unwrap();
+        assert_eq!(result.status, OrderStatus::CancelledSelfTrade);
+        assert_eq!(result.fills.len(), 1);
+        assert_eq!(result.fills[0].maker_order_id, 1);
+        assert_eq!(result.fills[0].quantity, 5);
+
+        // Trader B's resting ask is still there
+        assert_eq!(engine.book().order_count(), 1);
+        assert_eq!(engine.book().best_ask(), Some(101));
+    }
+
+    #[test]
+    fn self_trade_multiple_resting_same_trader() {
+        let mut engine = MatchingEngine::new();
+        // Trader 1 rests two asks
+        engine.add_order(ask_trader(1, 1, 100, 10, 1)).unwrap();
+        engine.add_order(ask_trader(2, 1, 101, 10, 2)).unwrap();
+
+        // Same trader 1 sends bid — cancelled on first encounter
+        let result = engine.add_order(bid_trader(3, 1, 105, 30, 3)).unwrap();
+        assert_eq!(result.status, OrderStatus::CancelledSelfTrade);
+        assert!(result.fills.is_empty());
+
+        // Both resting asks untouched
+        assert_eq!(engine.book().order_count(), 2);
+    }
 }
 
 #[cfg(test)]
@@ -376,6 +464,7 @@ mod proptests {
                 OrderStatus::PartiallyFilled | OrderStatus::Resting => {
                     taker_qty - filled
                 }
+                OrderStatus::CancelledSelfTrade => taker_qty - filled,
             };
             prop_assert_eq!(filled + remainder, taker_qty);
         }
@@ -434,5 +523,21 @@ mod proptests {
             }
         }
 
+        #[test]
+        fn no_self_trade_fills(
+            price in 1_i64..=100,
+            maker_qty in 1_u64..=100,
+            taker_qty in 1_u64..=100,
+        ) {
+            let mut engine = MatchingEngine::new();
+            // Same trader_id on both sides
+            engine.add_order(Order::new(1, 42, Side::Ask, price, maker_qty, 1).unwrap()).unwrap();
+
+            let result = engine.add_order(Order::new(2, 42, Side::Bid, price, taker_qty, 2).unwrap()).unwrap();
+
+            // No fills should have matching trader_ids (and here there should be no fills at all)
+            prop_assert!(result.fills.is_empty(), "self-trade produced fills");
+            prop_assert_eq!(result.status, OrderStatus::CancelledSelfTrade);
+        }
     }
 }
