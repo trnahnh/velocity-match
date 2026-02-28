@@ -1,12 +1,7 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
+use crate::arena::{ARENA_NULL, Arena, ArenaError, OrderNode, PriceLevel};
 use crate::order::{Order, Side};
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct OrderLocation {
-    pub(crate) side: Side,
-    pub(crate) price: i64,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BookError {
@@ -14,24 +9,38 @@ pub enum BookError {
     OrderNotFound(u64),
     PriceLevelNotFound(i64),
     FillExceedsQuantity { available: u64, requested: u64 },
+    ArenaFull,
 }
+
+impl From<ArenaError> for BookError {
+    fn from(_: ArenaError) -> Self {
+        Self::ArenaFull
+    }
+}
+
 #[derive(Debug)]
 pub struct OrderBook {
-    bids: HashMap<i64, VecDeque<Order>>,
-    asks: HashMap<i64, VecDeque<Order>>,
+    bids: HashMap<i64, PriceLevel>,
+    asks: HashMap<i64, PriceLevel>,
     best_bid: Option<i64>,
     best_ask: Option<i64>,
-    order_index: HashMap<u64, OrderLocation>,
+    order_index: HashMap<u64, u32>,
+    arena: Arena,
 }
 
 impl OrderBook {
     pub fn new() -> Self {
+        Self::with_capacity(Arena::default_capacity())
+    }
+
+    pub fn with_capacity(arena_capacity: u32) -> Self {
         Self {
-            bids: HashMap::new(),
-            asks: HashMap::new(),
+            bids: HashMap::with_capacity(Arena::default_level_capacity()),
+            asks: HashMap::with_capacity(Arena::default_level_capacity()),
             best_bid: None,
             best_ask: None,
-            order_index: HashMap::new(),
+            order_index: HashMap::with_capacity(arena_capacity as usize),
+            arena: Arena::new(arena_capacity),
         }
     }
 
@@ -52,60 +61,92 @@ impl OrderBook {
             return Err(BookError::DuplicateOrderId(order.id));
         }
 
-        let location = OrderLocation {
-            side: order.side,
-            price: order.price,
+        let side = order.side;
+        let price = order.price;
+        let id = order.id;
+
+        let Self {
+            bids,
+            asks,
+            arena,
+            order_index,
+            ..
+        } = self;
+
+        let index = arena.alloc(&order)?;
+
+        let levels = match side {
+            Side::Bid => bids,
+            Side::Ask => asks,
         };
+        let level = levels.entry(price).or_insert_with(PriceLevel::new);
+        arena.push_back(level, index);
 
-        let levels = match order.side {
-            Side::Bid => &mut self.bids,
-            Side::Ask => &mut self.asks,
-        };
-        levels
-            .entry(order.price)
-            .or_default()
-            .push_back(order.clone());
+        order_index.insert(id, index);
 
-        self.order_index.insert(order.id, location);
-        self.update_best_after_insert(order.side, order.price);
+        self.update_best_after_insert(side, price);
 
+        debug_assert_eq!(self.arena.count() as usize, self.order_index.len());
         Ok(())
     }
 
     pub fn cancel_order(&mut self, order_id: u64) -> Result<Order, BookError> {
-        let location = self
-            .order_index
+        let Self {
+            bids,
+            asks,
+            arena,
+            order_index,
+            best_bid,
+            best_ask,
+        } = self;
+
+        let index = order_index
             .remove(&order_id)
             .ok_or(BookError::OrderNotFound(order_id))?;
 
-        let levels = match location.side {
-            Side::Bid => &mut self.bids,
-            Side::Ask => &mut self.asks,
+        let order = arena.get(index).to_order();
+        let side = order.side;
+        let price = order.price;
+
+        let level_empty = {
+            let level = match side {
+                Side::Bid => bids.get_mut(&price),
+                Side::Ask => asks.get_mut(&price),
+            }
+            .ok_or(BookError::PriceLevelNotFound(price))?;
+
+            arena.remove(level, index);
+            arena.dealloc(index);
+            level.count == 0
         };
-        let level = levels
-            .get_mut(&location.price)
-            .ok_or(BookError::PriceLevelNotFound(location.price))?;
 
-        let pos = level
-            .iter()
-            .position(|o| o.id == order_id)
-            .ok_or(BookError::OrderNotFound(order_id))?;
-
-        let order = level.remove(pos).expect("position was just found");
-
-        if level.is_empty() {
-            levels.remove(&location.price);
-            self.recompute_best(location.side);
+        if level_empty {
+            match side {
+                Side::Bid => {
+                    bids.remove(&price);
+                    *best_bid = bids.keys().copied().max();
+                }
+                Side::Ask => {
+                    asks.remove(&price);
+                    *best_ask = asks.keys().copied().min();
+                }
+            }
         }
 
+        debug_assert_eq!(arena.count() as usize, order_index.len());
         Ok(order)
     }
 
-    pub(crate) fn peek_front(&self, side: Side, price: i64) -> Option<&Order> {
-        match side {
-            Side::Bid => self.bids.get(&price)?.front(),
-            Side::Ask => self.asks.get(&price)?.front(),
+    pub(crate) fn peek_front(&self, side: Side, price: i64) -> Option<&OrderNode> {
+        let levels = match side {
+            Side::Bid => &self.bids,
+            Side::Ask => &self.asks,
+        };
+        let level = levels.get(&price)?;
+        if level.head == ARENA_NULL {
+            return None;
         }
+        Some(self.arena.get(level.head))
     }
 
     pub(crate) fn reduce_front_quantity(
@@ -114,19 +155,28 @@ impl OrderBook {
         price: i64,
         fill_qty: u64,
     ) -> Result<u64, BookError> {
-        // Collect removal info before touching order_index to avoid overlapping borrows.
-        let (remaining, removed_id, level_empty) = {
-            let levels = match side {
-                Side::Bid => &mut self.bids,
-                Side::Ask => &mut self.asks,
-            };
-            let level = levels
-                .get_mut(&price)
-                .ok_or(BookError::PriceLevelNotFound(price))?;
+        let Self {
+            bids,
+            asks,
+            arena,
+            order_index,
+            best_bid,
+            best_ask,
+        } = self;
 
-            let front = level
-                .front_mut()
-                .ok_or(BookError::PriceLevelNotFound(price))?;
+        let (remaining, level_empty) = {
+            let level = match side {
+                Side::Bid => bids.get_mut(&price),
+                Side::Ask => asks.get_mut(&price),
+            }
+            .ok_or(BookError::PriceLevelNotFound(price))?;
+
+            if level.head == ARENA_NULL {
+                return Err(BookError::PriceLevelNotFound(price));
+            }
+
+            let head_idx = level.head;
+            let front = arena.get_mut(head_idx);
 
             if fill_qty > front.quantity {
                 return Err(BookError::FillExceedsQuantity {
@@ -136,30 +186,34 @@ impl OrderBook {
             }
 
             front.quantity -= fill_qty;
+            level.qty -= fill_qty;
             let remaining = front.quantity;
 
             if remaining == 0 {
-                let removed = level.pop_front().expect("front was just accessed");
-                let empty = level.is_empty();
-                (0, Some(removed.id), empty)
+                let removed_id = arena.get(head_idx).id;
+                arena.pop_front(level);
+                arena.dealloc(head_idx);
+                order_index.remove(&removed_id);
+                (0u64, level.count == 0)
             } else {
-                (remaining, None, false)
+                (remaining, false)
             }
         };
 
-        if let Some(id) = removed_id {
-            self.order_index.remove(&id);
-
-            if level_empty {
-                let levels = match side {
-                    Side::Bid => &mut self.bids,
-                    Side::Ask => &mut self.asks,
-                };
-                levels.remove(&price);
-                self.recompute_best(side);
+        if level_empty {
+            match side {
+                Side::Bid => {
+                    bids.remove(&price);
+                    *best_bid = bids.keys().copied().max();
+                }
+                Side::Ask => {
+                    asks.remove(&price);
+                    *best_ask = asks.keys().copied().min();
+                }
             }
         }
 
+        debug_assert_eq!(arena.count() as usize, order_index.len());
         Ok(remaining)
     }
 
@@ -170,17 +224,6 @@ impl OrderBook {
             }
             Side::Ask => {
                 self.best_ask = Some(self.best_ask.map_or(price, |a| a.min(price)));
-            }
-        }
-    }
-
-    fn recompute_best(&mut self, side: Side) {
-        match side {
-            Side::Bid => {
-                self.best_bid = self.bids.keys().copied().max();
-            }
-            Side::Ask => {
-                self.best_ask = self.asks.keys().copied().min();
             }
         }
     }
@@ -325,5 +368,49 @@ mod tests {
         assert_eq!(book.best_ask(), None);
         assert_eq!(book.order_count(), 0);
         assert!(book.peek_front(Side::Bid, 100).is_none());
+    }
+
+    #[test]
+    fn arena_full_rejects_insert() {
+        let mut book = OrderBook::with_capacity(2);
+        book.insert_order(bid(1, 100, 10, 1)).unwrap();
+        book.insert_order(bid(2, 101, 10, 2)).unwrap();
+        let err = book.insert_order(bid(3, 102, 10, 3)).unwrap_err();
+        assert_eq!(err, BookError::ArenaFull);
+        assert_eq!(book.order_count(), 2);
+    }
+
+    #[test]
+    fn cancel_frees_slot_for_reuse() {
+        let mut book = OrderBook::with_capacity(2);
+        book.insert_order(bid(1, 100, 10, 1)).unwrap();
+        book.insert_order(bid(2, 101, 10, 2)).unwrap();
+        assert_eq!(
+            book.insert_order(bid(3, 102, 10, 3)).unwrap_err(),
+            BookError::ArenaFull
+        );
+
+        book.cancel_order(1).unwrap();
+        book.insert_order(bid(3, 102, 10, 3)).unwrap();
+        assert_eq!(book.order_count(), 2);
+        assert_eq!(book.best_bid(), Some(102));
+    }
+
+    #[test]
+    fn cancel_middle_of_level() {
+        let mut book = OrderBook::with_capacity(8);
+        book.insert_order(bid(1, 100, 10, 1)).unwrap();
+        book.insert_order(bid(2, 100, 20, 2)).unwrap();
+        book.insert_order(bid(3, 100, 30, 3)).unwrap();
+
+        book.cancel_order(2).unwrap();
+        assert_eq!(book.order_count(), 2);
+
+        let front = book.peek_front(Side::Bid, 100).unwrap();
+        assert_eq!(front.id, 1);
+
+        book.reduce_front_quantity(Side::Bid, 100, 10).unwrap();
+        let front = book.peek_front(Side::Bid, 100).unwrap();
+        assert_eq!(front.id, 3);
     }
 }
