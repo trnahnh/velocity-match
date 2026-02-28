@@ -1,3 +1,3 @@
 fn main() {
-    println!("Hello, world!");
+    println!("VelocityMatch — order matching engine");
 }
