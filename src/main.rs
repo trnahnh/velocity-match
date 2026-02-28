@@ -1,3 +1,3 @@
 fn main() {
-    println!("VelocityMatch — order matching engine");
+    println!("Ferrox — order matching engine");
 }

@@ -1,8 +1,8 @@
-# VelocityMatch — System Design Document
+# Ferrox — System Design Document
 
 ## 1. Overview
 
-VelocityMatch is a low-latency order matching engine implementing price-time priority (FIFO) for a single-instrument limit order book. The engine targets sub-50µs P99 tick-to-trade latency at 1M+ orders/second throughput with zero heap allocation on the hot path.
+Ferrox is a low-latency order matching engine implementing price-time priority (FIFO) for a single-instrument limit order book. The engine targets sub-50µs P99 tick-to-trade latency at 1M+ orders/second throughput with zero heap allocation on the hot path.
 
 This document covers the architecture, data flow, performance design decisions, failure modes, and deployment considerations.
 
@@ -415,10 +415,10 @@ In production: use `numactl --membind=0 --cpunodebind=0` to pin both thread and 
 # (set in GRUB: isolcpus=2,3)
 
 # Pin ingestion thread to CPU 2
-taskset -c 2 ./velocity-match --thread ingestion
+taskset -c 2 ./ferrox --thread ingestion
 
 # Pin matching thread to CPU 3
-taskset -c 3 ./velocity-match --thread matching
+taskset -c 3 ./ferrox --thread matching
 ```
 
 Isolated CPUs are not used by any other process, eliminating scheduling jitter. The two threads should be on the same physical core's sibling hyperthreads or adjacent cores sharing L2 cache.
