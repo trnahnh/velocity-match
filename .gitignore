@@ -21,3 +21,8 @@ target
 #.idea/
 
 CLAUDE.md
+
+
+# Added by cargo
+
+/target
