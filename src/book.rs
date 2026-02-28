@@ -198,11 +198,11 @@ mod tests {
     use crate::order::Order;
 
     fn bid(id: u64, price: i64, qty: u64, ts: u64) -> Order {
-        Order::new(id, Side::Bid, price, qty, ts).unwrap()
+        Order::new(id, 1, Side::Bid, price, qty, ts).unwrap()
     }
 
     fn ask(id: u64, price: i64, qty: u64, ts: u64) -> Order {
-        Order::new(id, Side::Ask, price, qty, ts).unwrap()
+        Order::new(id, 1, Side::Ask, price, qty, ts).unwrap()
     }
 
     #[test]

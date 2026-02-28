@@ -159,11 +159,11 @@ mod tests {
     use crate::order::{Order, Side};
 
     fn bid(id: u64, price: i64, qty: u64, ts: u64) -> Order {
-        Order::new(id, Side::Bid, price, qty, ts).unwrap()
+        Order::new(id, id, Side::Bid, price, qty, ts).unwrap()
     }
 
     fn ask(id: u64, price: i64, qty: u64, ts: u64) -> Order {
-        Order::new(id, Side::Ask, price, qty, ts).unwrap()
+        Order::new(id, id, Side::Ask, price, qty, ts).unwrap()
     }
 
     #[test]
@@ -317,6 +317,7 @@ mod tests {
         let mut engine = MatchingEngine::new();
         let order = Order {
             id: 1,
+            trader_id: 1,
             side: Side::Bid,
             price: 100,
             quantity: 0,
@@ -364,9 +365,10 @@ mod proptests {
             taker_qty in 1_u64..=1000,
         ) {
             let mut engine = MatchingEngine::new();
-            engine.add_order(Order::new(1, Side::Ask, price, maker_qty, 1).unwrap()).unwrap();
+            // Different trader_ids so STP doesn't trigger
+            engine.add_order(Order::new(1, 1, Side::Ask, price, maker_qty, 1).unwrap()).unwrap();
 
-            let result = engine.add_order(Order::new(2, Side::Bid, price, taker_qty, 2).unwrap()).unwrap();
+            let result = engine.add_order(Order::new(2, 2, Side::Bid, price, taker_qty, 2).unwrap()).unwrap();
 
             let filled: u64 = result.fills.iter().map(|f| f.quantity).sum();
             let remainder = match result.status {
@@ -388,7 +390,8 @@ mod proptests {
             let mut engine = MatchingEngine::new();
             for (i, (side, price, qty)) in orders.into_iter().enumerate() {
                 let id = (i + 1) as u64;
-                let order = Order::new(id, side, price, qty, id).unwrap();
+                // Each order from a unique trader to avoid STP interference
+                let order = Order::new(id, id, side, price, qty, id).unwrap();
                 let _ = engine.add_order(order);
             }
 
@@ -404,9 +407,10 @@ mod proptests {
             taker_qty in 1_u64..=1000,
         ) {
             let mut engine = MatchingEngine::new();
-            engine.add_order(Order::new(1, Side::Ask, price, maker_qty, 1).unwrap()).unwrap();
+            // Different trader_ids so STP doesn't trigger
+            engine.add_order(Order::new(1, 1, Side::Ask, price, maker_qty, 1).unwrap()).unwrap();
 
-            let result = engine.add_order(Order::new(2, Side::Bid, price, taker_qty, 2).unwrap()).unwrap();
+            let result = engine.add_order(Order::new(2, 2, Side::Bid, price, taker_qty, 2).unwrap()).unwrap();
             prop_assert!(!result.fills.is_empty(), "bid >= ask but no fills produced");
         }
 
@@ -420,7 +424,8 @@ mod proptests {
             let mut engine = MatchingEngine::new();
             for (i, (side, price, qty)) in orders.into_iter().enumerate() {
                 let id = (i + 1) as u64;
-                let order = Order::new(id, side, price, qty, id).unwrap();
+                // Each order from a unique trader
+                let order = Order::new(id, id, side, price, qty, id).unwrap();
                 if let Ok(result) = engine.add_order(order) {
                     for fill in &result.fills {
                         prop_assert!(fill.quantity > 0, "fill with zero quantity");
@@ -428,5 +433,6 @@ mod proptests {
                 }
             }
         }
+
     }
 }
