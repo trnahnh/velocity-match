@@ -56,3 +56,59 @@
 | Test time | ~0.06s | ~0.13s |
 
 Note: Phase 1 test time measured before arena was introduced. Phase 2 tests use `with_capacity(1024)` to keep arena small (64 KB vs 64 MB default).
+
+---
+
+## Phase 2 → Phase 3: Sorted Price Levels
+
+**What changed**: `HashMap<i64, PriceLevel>` replaced with `BTreeMap<i64, PriceLevel>` for bid/ask sides. Best-price recomputation after level removal: O(n) linear scan → O(log n) BTreeMap min/max.
+
+Note: Phase 2 and Phase 3 numbers below are from the same benchmark session for an apples-to-apples comparison.
+
+### Matching (Phase 2→3)
+
+| Benchmark | Phase 2 | Phase 3 | Change |
+| --- | --- | --- | --- |
+| match/full_fill_1k | 87.47 µs | 61.49 µs | -30% |
+| match/multi_level_sweep | 45.14 µs | 14.73 µs | -67% |
+
+`multi_level_sweep` sweeps 100 ask levels, emptying each and recomputing `best_ask`. With HashMap this was O(n) per level removal; with BTreeMap it's O(log n).
+
+### Order Cancel (Phase 2→3)
+
+| Benchmark | Phase 2 | Phase 3 | Change |
+| --- | --- | --- | --- |
+| cancel_all/100 | 4.42 µs | 2.05 µs | -54% |
+| cancel_all/1000 | 39.56 µs | 20.79 µs | -47% |
+| cancel_all/5000 | 206.19 µs | 110.74 µs | -46% |
+| cancel_best_level/100 | 35.62 µs | 5.29 µs | -85% |
+| cancel_best_level/500 | 254.49 µs | 40.12 µs | -84% |
+| cancel_best_level/1000 | 696.94 µs | 124.07 µs | -82% |
+| cancel_middle_of_1k | 1.02 µs | 0.85 µs | -17% |
+
+`cancel_best_level` cancels N orders across N distinct prices, emptying a level on every cancel (worst case for best-price recomputation). O(n²) total with HashMap → O(n log n) with BTreeMap.
+
+### Insert (Phase 2→3)
+
+| Benchmark | Phase 2 | Phase 3 | Change |
+| --- | --- | --- | --- |
+| insert/non_crossing/100 | 8.18 µs | 6.40 µs | -22% |
+| insert/non_crossing/1000 | 77.46 µs | 64.23 µs | -17% |
+| insert/non_crossing/10000 | 780.92 µs | 608.91 µs | -22% |
+
+Surprising improvement: with only 2 distinct prices, BTreeMap avoids HashMap's hashing overhead and its pre-allocated 4096-entry bucket array polluting the cache. Regression expected only with many distinct price levels.
+
+### Mixed Workload (Phase 2→3)
+
+| Benchmark | Phase 2 | Phase 3 | Change |
+| --- | --- | --- | --- |
+| mixed_workload_10k | 825.83 µs | 887.23 µs | +7% |
+
+Slight regression due to BTreeMap node allocation on new price level creation (no `with_capacity` equivalent).
+
+### Test Suite (Phase 2→3)
+
+| Metric | Phase 2 | Phase 3 |
+| --- | --- | --- |
+| Test count | 53 | 53 |
+| Test time | ~0.13s | ~0.11s |

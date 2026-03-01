@@ -76,8 +76,8 @@ Order {
 
 ```text
 OrderBook {
-    bids:       HashMap<i64, PriceLevel>    // price → level (buy side)
-    asks:       HashMap<i64, PriceLevel>    // price → level (sell side)
+    bids:       BTreeMap<i64, PriceLevel>   // price → level (buy side, sorted)
+    asks:       BTreeMap<i64, PriceLevel>   // price → level (sell side, sorted)
     best_bid:   Option<i64>                 // Cached best bid price
     best_ask:   Option<i64>                 // Cached best ask price
     pool:       Arena<Order>                // Pre-allocated order storage
@@ -161,9 +161,9 @@ Sell-side matching is symmetric.
 Maintaining `best_bid` and `best_ask` avoids scanning all price levels on every match:
 
 - On insert to empty level: compare with current best, update if better.
-- On removal of last order at best level: scan adjacent prices. In practice, the spread is narrow and this scan touches 1-3 levels.
+- On removal of last order at best level: O(log n) lookup via BTreeMap — `keys().next_back()` for best bid (max), `keys().next()` for best ask (min).
 
-For production systems with wide price ranges, a sorted structure (e.g., BTreeMap or a fixed-size sorted array) replaces the linear scan. For this project, HashMap with cached best prices is sufficient.
+Price levels are stored in `BTreeMap<i64, PriceLevel>`, which keeps keys sorted. This replaces the earlier HashMap approach that required O(n) linear scan on level removal.
 
 ---
 
