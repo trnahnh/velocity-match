@@ -94,28 +94,30 @@
 
 ## Phase 5: Binary Protocol + UDP Networking
 
-**Objective**: Replace text-based serialization with a zero-copy binary codec and broadcast trade execution reports over UDP multicast.
+**Objective**: Add a binary wire protocol and TCP/UDP networking, wiring up the 2-thread architecture: TCP ingestion → ring buffer → matching → UDP multicast.
 
 **Deliverables**:
 
-- Message types: `NewOrder`, `CancelOrder`, `ExecutionReport` as flat binary structs
-- Zero-copy encoding/decoding using raw byte slices
-- UDP multicast publisher: engine broadcasts `ExecutionReport` to all subscribers
-- Sequence number on every outbound message for gap detection
-- Simple subscriber client that detects and logs missed sequence numbers
-- Optional: FIX protocol (tag=value) parser for inbound order entry
+- Wire protocol: `NewOrder` (40B), `CancelOrder` (16B), `ExecutionReport` (48B) — little-endian, fixed-size
+- `EngineCommand` enum as ring buffer payload between ingestion and matching threads
+- TCP ingestion: read-exact framing (first byte = msg_type → known size), timestamp assignment
+- UDP multicast publisher: matching thread broadcasts `ExecutionReport` with monotonic `seq_num`
+- Subscriber example (`examples/subscriber.rs`) with sequence gap detection
+- 2-thread gateway: `GatewayConfig` for listen addr, multicast addr, ring/arena capacity
 
 **Stack**:
 
 | Component | Choice | Rationale |
 | --------- | ------ | --------- |
-| Binary Encoding | Custom flat codec + `byteorder` | Zero-copy, no schema overhead |
-| Alternative Encoding | `bincode` or SBE (if tooling works) | Industry-standard binary formats |
-| UDP Multicast | `socket2` | Low-level socket control, multicast join |
-| Gap Recovery | Sequence numbers + retransmit request | Handle UDP packet loss |
-| Optional FIX Parser | Custom or `fefix` | Industry-standard order entry protocol |
+| Binary Encoding | Custom flat codec (`from_le_bytes`/`to_le_bytes`) | Zero-copy, no deps, no schema overhead |
+| TCP Ingestion | `std::net::TcpListener` | Single-client, blocking read_exact |
+| UDP Multicast | `std::net::UdpSocket` | Multicast TTL=1, send_to() |
+| Gap Detection | Monotonic `seq_num` on ExecutionReport | Subscriber tracks expected seq |
+| Ring Buffer | Phase 4 SPSC ring | Lock-free EngineCommand transfer |
 
-**Constraint**: No JSON, no Protobuf on the hot path. Messages are fixed-size structs cast directly to/from byte buffers. Encoding overhead must be effectively zero.
+**Constraint**: No JSON, no Protobuf on the hot path. Messages are fixed-size structs encoded via `to_le_bytes`/`from_le_bytes`. Zero new dependencies.
+
+**Status**: Complete.
 
 ---
 

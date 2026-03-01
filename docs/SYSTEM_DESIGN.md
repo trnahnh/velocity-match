@@ -97,35 +97,33 @@ PriceLevel {
 All messages are fixed-size binary structs. No variable-length fields on the hot path.
 
 ```text
-NewOrder {
+NewOrder {                          // 40 bytes, little-endian
     msg_type:   u8      // 0x01
     side:       u8      // 0=Bid, 1=Ask
-    padding:    [u8; 2]
+    reserved:   [u8; 6]
     order_id:   u64
+    trader_id:  u64     // Needed for self-trade prevention
     price:      i64
     quantity:   u64
-    timestamp:  u64
 }
-// Total: 32 bytes, naturally aligned
+// Timestamp assigned by ingestion thread, not on wire
 
-CancelOrder {
+CancelOrder {                       // 16 bytes
     msg_type:   u8      // 0x02
-    padding:    [u8; 7]
+    reserved:   [u8; 7]
     order_id:   u64
 }
-// Total: 16 bytes
 
-ExecutionReport {
-    msg_type:     u8    // 0x03
-    padding:      [u8; 3]
-    seq_num:      u32   // Monotonic sequence for gap detection
-    buy_order_id: u64
-    sell_order_id:u64
-    price:        i64
-    quantity:     u64
-    timestamp:    u64
+ExecutionReport {                   // 48 bytes
+    msg_type:       u8    // 0x03
+    reserved:       [u8; 3]
+    seq_num:        u32   // Monotonic sequence for gap detection
+    taker_order_id: u64
+    maker_order_id: u64
+    price:          i64
+    quantity:       u64
+    timestamp:      u64
 }
-// Total: 48 bytes
 ```
 
 ---
