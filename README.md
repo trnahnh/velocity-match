@@ -81,6 +81,10 @@ cargo bench               # criterion benchmarks (matching + ring buffer)
 - [Development Phases](docs/PHASES.md) — deliverables, stack choices, and rationale per phase
 - [Performance Metrics](docs/METRICS.md) — before/after benchmark numbers for every optimization
 
+## Contact
+
+**Anh Tran** — [anhdtran.forwork@gmail.com](mailto:anhdtran.forwork@gmail.com)
+
 ## License
 
 MIT
