@@ -112,3 +112,45 @@ Slight regression due to BTreeMap node allocation on new price level creation (n
 | --- | --- | --- |
 | Test count | 53 | 53 |
 | Test time | ~0.13s | ~0.11s |
+
+---
+
+## Phase 4: Lock-Free SPSC Ring Buffer
+
+**What changed**: New lock-free single-producer single-consumer ring buffer (`src/ring.rs`) using the Disruptor pattern — free-running cursors with bitmask indexing, `CachePadded` atomics, and local cursor caching.
+
+### Throughput (1M items, 2 threads)
+
+| Benchmark | SPSC Ring | std::sync::mpsc | Speedup |
+| --- | --- | --- | --- |
+| u64 / 1M | 1.92 ms | 18.43 ms | **9.6x** |
+| Order (48B) / 1M | 5.57 ms | 21.49 ms | **3.9x** |
+
+SPSC ring buffer: ~520M u64 ops/sec, ~180M Order ops/sec.
+std::sync::mpsc: ~54M u64 ops/sec, ~47M Order ops/sec.
+
+### Latency (single-thread, push 1 / pop 1)
+
+| Benchmark | Time |
+| --- | --- |
+| push_pop_alternating | 2.13 ns/op |
+
+### Design
+
+| Property | Value |
+| --- | --- |
+| Buffer storage | `Box<[UnsafeCell<MaybeUninit<T>>]>` |
+| Capacity | Power-of-2, bitmask indexing |
+| Cursor strategy | Free-running `AtomicUsize` + mask on access |
+| False sharing prevention | `#[repr(align(64))]` `CachePadded<AtomicUsize>` |
+| Local cursor caching | Producer caches tail, Consumer caches head |
+| Memory ordering | Acquire/Release (plain MOV on x86 TSO) |
+| `unsafe` blocks | 4 (slot write, slot read, Send/Sync impls, Drop) |
+| New dependencies | 0 |
+
+### Test Suite (Phase 3→4)
+
+| Metric | Phase 3 | Phase 4 |
+| --- | --- | --- |
+| Test count | 53 | 66 |
+| Test time | ~0.11s | ~0.11s |
