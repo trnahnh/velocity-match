@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::arena::{ARENA_NULL, Arena, ArenaError, OrderNode, PriceLevel};
 use crate::order::{Order, Side};
@@ -20,8 +20,8 @@ impl From<ArenaError> for BookError {
 
 #[derive(Debug)]
 pub struct OrderBook {
-    bids: HashMap<i64, PriceLevel>,
-    asks: HashMap<i64, PriceLevel>,
+    bids: BTreeMap<i64, PriceLevel>,
+    asks: BTreeMap<i64, PriceLevel>,
     best_bid: Option<i64>,
     best_ask: Option<i64>,
     order_index: HashMap<u64, u32>,
@@ -35,8 +35,8 @@ impl OrderBook {
 
     pub fn with_capacity(arena_capacity: u32) -> Self {
         Self {
-            bids: HashMap::with_capacity(Arena::default_level_capacity()),
-            asks: HashMap::with_capacity(Arena::default_level_capacity()),
+            bids: BTreeMap::new(),
+            asks: BTreeMap::new(),
             best_bid: None,
             best_ask: None,
             order_index: HashMap::with_capacity(arena_capacity as usize),
@@ -124,11 +124,11 @@ impl OrderBook {
             match side {
                 Side::Bid => {
                     bids.remove(&price);
-                    *best_bid = bids.keys().copied().max();
+                    *best_bid = bids.keys().next_back().copied();
                 }
                 Side::Ask => {
                     asks.remove(&price);
-                    *best_ask = asks.keys().copied().min();
+                    *best_ask = asks.keys().next().copied();
                 }
             }
         }
@@ -204,11 +204,11 @@ impl OrderBook {
             match side {
                 Side::Bid => {
                     bids.remove(&price);
-                    *best_bid = bids.keys().copied().max();
+                    *best_bid = bids.keys().next_back().copied();
                 }
                 Side::Ask => {
                     asks.remove(&price);
-                    *best_ask = asks.keys().copied().min();
+                    *best_ask = asks.keys().next().copied();
                 }
             }
         }

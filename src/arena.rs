@@ -8,7 +8,6 @@ pub(crate) enum ArenaError {
 pub(crate) const ARENA_NULL: u32 = u32::MAX;
 
 const DEFAULT_CAPACITY: u32 = 1_048_576;
-const DEFAULT_LEVEL_CAPACITY: usize = 4_096;
 
 #[derive(Clone)]
 #[repr(C, align(64))]
@@ -125,10 +124,6 @@ impl Arena {
 
     pub(crate) fn default_capacity() -> u32 {
         DEFAULT_CAPACITY
-    }
-
-    pub(crate) fn default_level_capacity() -> usize {
-        DEFAULT_LEVEL_CAPACITY
     }
 
     pub(crate) fn count(&self) -> u32 {
