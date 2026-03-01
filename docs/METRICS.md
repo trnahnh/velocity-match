@@ -138,7 +138,7 @@ Note: `std::sync::mpsc` is a multi-producer channel (extra synchronization overh
 | --- | --- |
 | push_pop_alternating | 2.11 ns/op |
 
-### Design
+### Persistence Design
 
 | Property | Value |
 | --- | --- |
@@ -157,3 +157,57 @@ Note: `std::sync::mpsc` is a multi-producer channel (extra synchronization overh
 | --- | --- | --- |
 | Test count | 53 | 66 |
 | Test time | ~0.11s | ~0.11s |
+
+---
+
+## Phase 5 → Phase 6: Persistence + Deterministic Replay
+
+**What changed**: Added write-ahead log (mmap-backed, CRC32 integrity), periodic snapshots (bincode + serde), and deterministic crash recovery. WAL append integrated into matching loop before matching. Persistence is optional (`data_dir: Option<PathBuf>`).
+
+### WAL Performance
+
+| Benchmark | Time | Notes |
+| --- | --- | --- |
+| wal/encode_new_order | 56 ns | Single encode + CRC32 |
+| wal/encode+crc_10k | 572 µs | 10K NewOrder encodes (57 ns/op) |
+| wal/mixed_encode+crc_10k | 498 µs | 80% NewOrder + 20% Cancel (50 ns/op) |
+
+WAL append overhead per order: **~56 ns**. This is the cost added to the hot path when persistence is enabled.
+
+### Snapshot Performance
+
+| Benchmark | Time | Notes |
+| --- | --- | --- |
+| snapshot/all_resting_orders_10k | 55 µs | Extract 10K orders from book |
+| snapshot/bincode_serialize_10k | 71 µs | Serialize 10K orders to bytes |
+| snapshot/bincode_deserialize_10k | 163 µs | Deserialize 10K orders from bytes |
+| snapshot/restore_from_orders_10k | 1.39 ms | Rebuild engine from 10K orders |
+
+Full snapshot cycle (extract + serialize): **~126 µs** for 10K orders. Happens every 10K commands (default interval), so amortized cost is ~12.6 ns/order.
+
+Recovery from snapshot + 10K WAL replay: **~1.4 ms** worst case.
+
+### Design
+
+| Property | Value |
+| --- | --- |
+| WAL format | `[len:4][crc32:4][payload:N][pad to 8B align]` |
+| WAL payload encoding | Reuses `protocol.rs` `encode_new_order`/`encode_cancel_order` |
+| WAL backing | `memmap2::MmapMut` (OS page cache) |
+| WAL initial size | 64 MB (~1M records), doubles on growth |
+| Snapshot format | `bincode` (serde) |
+| Snapshot atomicity | Write to temp file → rename |
+| Snapshot naming | `snapshot_{wal_record_count:010}.bin` |
+| Integrity | CRC32 per WAL record + per snapshot |
+| Recovery | Load latest snapshot → replay WAL from snapshot position |
+| Hot-path allocation | Zero (pre-allocated encode buffer in WAL) |
+| `unsafe` blocks | 2 (both `MmapMut::map_mut()` with SAFETY comments) |
+| New dependencies | `memmap2`, `crc32fast`, `serde`, `bincode` |
+| New dev-dependencies | `tempfile` |
+
+### Test Suite (Phase 5→6)
+
+| Metric | Phase 5 | Phase 6 |
+| --- | --- | --- |
+| Test count | 91 | 134 |
+| Test time | ~0.13s | ~0.16s |

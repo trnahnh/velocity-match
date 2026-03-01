@@ -53,6 +53,24 @@ Built a Disruptor-style SPSC ring buffer for the ingestion-to-matching pipeline.
 
 540M ops/sec for raw values. 182M ops/sec for 48-byte Order structs.
 
+### Phase 5 — Binary Protocol + Networking
+
+Built a zero-dependency binary wire protocol: `NewOrder` (40B), `CancelOrder` (16B), `ExecutionReport` (48B) — little-endian, fixed-size, `from_le_bytes`/`to_le_bytes`. No JSON, no Protobuf on the hot path.
+
+Wired up the full 2-thread architecture: TCP ingestion reads orders, pushes them through the SPSC ring buffer to the matching thread, which broadcasts `ExecutionReport` messages over UDP multicast with monotonic sequence numbers for gap detection.
+
+### Phase 6 — Crash Recovery
+
+Added write-ahead logging and periodic snapshots for deterministic crash recovery. Every command is persisted to an mmap-backed WAL before matching. Snapshots are taken every N commands (configurable) to bound recovery time.
+
+| Benchmark | Time | Notes |
+| --- | --- | --- |
+| WAL append (encode + CRC32) | 56 ns/op | Hot-path overhead per order |
+| Snapshot capture + serialize (10K orders) | 126 us | Amortized ~12.6 ns/order at default interval |
+| Full recovery (snapshot + 10K WAL replay) | 1.4 ms | Worst case |
+
+WAL uses the existing `protocol.rs` codec — no duplicate serialization. Pre-allocated encode buffer means zero allocation on the hot path. Recovery is deterministic: same WAL replayed twice produces bit-exact book state.
+
 ## Current State
 
 | Phase | Focus | Status |
@@ -61,18 +79,18 @@ Built a Disruptor-style SPSC ring buffer for the ingestion-to-matching pipeline.
 | 2 | Arena object pool, intrusive linked lists, cache-line alignment | Done |
 | 3 | BTreeMap sorted price levels, O(log n) best-price recomputation | Done |
 | 4 | Lock-free SPSC ring buffer (Disruptor pattern) | Done |
-| 5 | Binary protocol, UDP multicast networking | Planned |
-| 6 | WAL persistence, deterministic crash recovery | Planned |
+| 5 | Binary protocol, TCP/UDP networking, 2-thread pipeline | Done |
+| 6 | WAL persistence, snapshots, deterministic crash recovery | Done |
 | 7 | End-to-end benchmarking suite, HdrHistogram, observability | Planned |
 
-66 tests. ~0.11s test time. Zero `unsafe` in the matching engine (4 `unsafe` blocks in the ring buffer, each with documented safety invariants).
+134 tests. ~0.16s test time. 6 `unsafe` blocks total (4 in ring buffer, 2 in WAL mmap), each with documented safety invariants.
 
 ## Quick Start
 
 ```bash
 cargo build --release     # build
-cargo test                # 66 tests
-cargo bench               # criterion benchmarks (matching + ring buffer)
+cargo test                # 134 tests
+cargo bench               # criterion benchmarks (matching, ring buffer, WAL, snapshots)
 ```
 
 ## Documentation
