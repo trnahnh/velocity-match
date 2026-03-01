@@ -1,5 +1,6 @@
 use std::io::{self, Read};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -11,14 +12,17 @@ use crate::protocol::{
     message_size,
 };
 use crate::ring::{self, Consumer, Producer};
+use crate::snapshot::Snapshot;
+use crate::wal::Wal;
 
 #[derive(Debug, Clone)]
 pub struct GatewayConfig {
     pub listen_addr: SocketAddr,
     pub multicast_addr: SocketAddr,
-    /// Must be a power of 2.
     pub ring_capacity: usize,
     pub arena_capacity: u32,
+    pub data_dir: Option<PathBuf>,
+    pub snapshot_interval: u64,
 }
 
 impl Default for GatewayConfig {
@@ -28,6 +32,8 @@ impl Default for GatewayConfig {
             multicast_addr: SocketAddr::new(Ipv4Addr::new(239, 1, 1, 1).into(), 9001),
             ring_capacity: 65536,
             arena_capacity: 1_048_576,
+            data_dir: None,
+            snapshot_interval: 10_000,
         }
     }
 }
@@ -126,62 +132,87 @@ fn handle_client(
     Ok(())
 }
 
+fn process_command(
+    cmd: EngineCommand,
+    engine: &mut MatchingEngine,
+    wal: &mut Option<Wal>,
+    udp: &UdpSocket,
+    multicast_addr: SocketAddr,
+    seq_num: &mut u32,
+    report_buf: &mut [u8; EXECUTION_REPORT_SIZE],
+) {
+    if let Some(w) = wal {
+        let _ = w.append(&cmd);
+    }
+
+    match cmd {
+        EngineCommand::NewOrder(order) => {
+            let timestamp = order.timestamp;
+            if let Ok(result) = engine.add_order(order) {
+                for fill in &result.fills {
+                    *seq_num = seq_num.wrapping_add(1);
+                    if encode_execution_report(report_buf, *seq_num, fill, timestamp).is_ok() {
+                        let _ = udp.send_to(report_buf, multicast_addr);
+                    }
+                }
+            }
+        }
+        EngineCommand::CancelOrder { order_id } => {
+            let _ = engine.cancel_order(order_id);
+        }
+    }
+}
+
 fn matching_loop(
     mut consumer: Consumer<EngineCommand>,
     mut engine: MatchingEngine,
+    mut wal: Option<Wal>,
+    snapshot_dir: Option<PathBuf>,
+    snapshot_interval: u64,
     udp: UdpSocket,
     multicast_addr: SocketAddr,
     shutdown: Arc<AtomicBool>,
 ) {
     let mut seq_num: u32 = 0;
     let mut report_buf = [0u8; EXECUTION_REPORT_SIZE];
+    let mut cmds_since_snapshot: u64 = 0;
 
     loop {
         match consumer.pop() {
-            Ok(cmd) => match cmd {
-                EngineCommand::NewOrder(order) => {
-                    let timestamp = order.timestamp;
-                    if let Ok(result) = engine.add_order(order) {
-                        for fill in &result.fills {
-                            seq_num = seq_num.wrapping_add(1);
-                            if encode_execution_report(&mut report_buf, seq_num, fill, timestamp)
-                                .is_ok()
-                            {
-                                let _ = udp.send_to(&report_buf, multicast_addr);
-                            }
-                        }
+            Ok(cmd) => {
+                process_command(
+                    cmd,
+                    &mut engine,
+                    &mut wal,
+                    &udp,
+                    multicast_addr,
+                    &mut seq_num,
+                    &mut report_buf,
+                );
+
+                cmds_since_snapshot += 1;
+                if let (Some(w), Some(dir)) = (&wal, &snapshot_dir) {
+                    if cmds_since_snapshot >= snapshot_interval {
+                        let snap = Snapshot::capture(&engine, w.record_count());
+                        let _ = snap.save(dir);
+                        let _ = w.flush_async();
+                        cmds_since_snapshot = 0;
                     }
                 }
-                EngineCommand::CancelOrder { order_id } => {
-                    let _ = engine.cancel_order(order_id);
-                }
-            },
+            }
             Err(_empty) => {
                 if shutdown.load(Ordering::Acquire) {
+                    // Drain remaining commands
                     while let Ok(cmd) = consumer.pop() {
-                        match cmd {
-                            EngineCommand::NewOrder(order) => {
-                                let timestamp = order.timestamp;
-                                if let Ok(result) = engine.add_order(order) {
-                                    for fill in &result.fills {
-                                        seq_num = seq_num.wrapping_add(1);
-                                        if encode_execution_report(
-                                            &mut report_buf,
-                                            seq_num,
-                                            fill,
-                                            timestamp,
-                                        )
-                                        .is_ok()
-                                        {
-                                            let _ = udp.send_to(&report_buf, multicast_addr);
-                                        }
-                                    }
-                                }
-                            }
-                            EngineCommand::CancelOrder { order_id } => {
-                                let _ = engine.cancel_order(order_id);
-                            }
-                        }
+                        process_command(
+                            cmd,
+                            &mut engine,
+                            &mut wal,
+                            &udp,
+                            multicast_addr,
+                            &mut seq_num,
+                            &mut report_buf,
+                        );
                     }
                     break;
                 }
@@ -191,22 +222,52 @@ fn matching_loop(
     }
 }
 
-/// Blocks until the TCP client disconnects.
 pub fn run(config: GatewayConfig) -> Result<(), GatewayError> {
     let (mut producer, consumer) = ring::ring_buffer::<EngineCommand>(config.ring_capacity);
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_match = Arc::clone(&shutdown);
 
-    let engine = MatchingEngine::with_capacity(config.arena_capacity);
+    let (engine, wal, snapshot_dir) = if let Some(ref data_dir) = config.data_dir {
+        match crate::recovery::recover(data_dir, config.arena_capacity) {
+            Ok((engine, wal)) => {
+                let snap_dir = data_dir.join("snapshots");
+                (engine, Some(wal), Some(snap_dir))
+            }
+            Err(e) => {
+                eprintln!("ferrox: recovery failed: {e}, starting fresh");
+                (
+                    MatchingEngine::with_capacity(config.arena_capacity),
+                    None,
+                    None,
+                )
+            }
+        }
+    } else {
+        (
+            MatchingEngine::with_capacity(config.arena_capacity),
+            None,
+            None,
+        )
+    };
 
     let udp = UdpSocket::bind("0.0.0.0:0")?;
     udp.set_multicast_ttl_v4(1)?;
 
     let multicast_addr = config.multicast_addr;
+    let snapshot_interval = config.snapshot_interval;
 
     let match_thread = thread::spawn(move || {
-        matching_loop(consumer, engine, udp, multicast_addr, shutdown_match);
+        matching_loop(
+            consumer,
+            engine,
+            wal,
+            snapshot_dir,
+            snapshot_interval,
+            udp,
+            multicast_addr,
+            shutdown_match,
+        );
     });
 
     let listener = TcpListener::bind(config.listen_addr)?;
@@ -253,6 +314,8 @@ mod tests {
         assert_eq!(config.multicast_addr.port(), 9001);
         assert_eq!(config.ring_capacity, 65536);
         assert_eq!(config.arena_capacity, 1_048_576);
+        assert!(config.data_dir.is_none());
+        assert_eq!(config.snapshot_interval, 10_000);
     }
 
     #[test]
@@ -317,7 +380,16 @@ mod tests {
         let udp_send = UdpSocket::bind("0.0.0.0:0").unwrap();
 
         let match_thread = thread::spawn(move || {
-            matching_loop(consumer, engine, udp_send, udp_recv_addr, shutdown_match);
+            matching_loop(
+                consumer,
+                engine,
+                None,
+                None,
+                10_000,
+                udp_send,
+                udp_recv_addr,
+                shutdown_match,
+            );
         });
 
         let client = thread::spawn(move || {
@@ -368,5 +440,76 @@ mod tests {
         assert_eq!(report.price, 100);
         assert_eq!(report.quantity, 50);
         assert!(report.timestamp > 0);
+    }
+
+    #[test]
+    fn matching_loop_with_persistence() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let snap_dir = data_dir.join("snapshots");
+
+        let wal = Wal::open(data_dir.join("wal.bin")).unwrap();
+        let engine = MatchingEngine::with_capacity(1024);
+
+        let udp_recv = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let udp_recv_addr = udp_recv.local_addr().unwrap();
+        udp_recv
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+
+        let (mut producer, consumer) = ring::ring_buffer::<EngineCommand>(64);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_match = Arc::clone(&shutdown);
+
+        let udp_send = UdpSocket::bind("0.0.0.0:0").unwrap();
+
+        let match_thread = thread::spawn(move || {
+            matching_loop(
+                consumer,
+                engine,
+                Some(wal),
+                Some(snap_dir),
+                10_000,
+                udp_send,
+                udp_recv_addr,
+                shutdown_match,
+            );
+        });
+
+        let ask_order = Order {
+            id: 1,
+            trader_id: 10,
+            side: Side::Ask,
+            price: 100,
+            quantity: 50,
+            timestamp: 1_000_000,
+        };
+        let bid_order = Order {
+            id: 2,
+            trader_id: 20,
+            side: Side::Bid,
+            price: 100,
+            quantity: 50,
+            timestamp: 2_000_000,
+        };
+
+        producer.push(EngineCommand::NewOrder(ask_order)).unwrap();
+        producer.push(EngineCommand::NewOrder(bid_order)).unwrap();
+
+        thread::sleep(Duration::from_millis(100));
+        shutdown.store(true, Ordering::Release);
+        match_thread.join().unwrap();
+
+        let wal = Wal::open(data_dir.join("wal.bin")).unwrap();
+        assert_eq!(wal.record_count(), 2);
+
+        let mut report_buf = [0u8; EXECUTION_REPORT_SIZE];
+        let (n, _) = udp_recv.recv_from(&mut report_buf).unwrap();
+        assert_eq!(n, EXECUTION_REPORT_SIZE);
+
+        let report = protocol::decode_execution_report(&report_buf).unwrap();
+        assert_eq!(report.seq_num, 1);
+        assert_eq!(report.quantity, 50);
     }
 }

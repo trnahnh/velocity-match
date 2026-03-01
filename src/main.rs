@@ -9,6 +9,10 @@ fn main() -> Result<(), GatewayError> {
     eprintln!("  udp multicast: {}", config.multicast_addr);
     eprintln!("  ring capacity: {}", config.ring_capacity);
     eprintln!("  arena capacity: {}", config.arena_capacity);
+    match &config.data_dir {
+        Some(dir) => eprintln!("  data dir:    {}", dir.display()),
+        None => eprintln!("  persistence: disabled"),
+    }
     eprintln!();
 
     ferrox::gateway::run(config)
