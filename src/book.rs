@@ -217,6 +217,31 @@ impl OrderBook {
         Ok(remaining)
     }
 
+    /// Asks ascending price, then bids descending price; FIFO within each level.
+    pub fn all_resting_orders(&self) -> Vec<Order> {
+        let mut orders = Vec::with_capacity(self.order_index.len());
+
+        for level in self.asks.values() {
+            let mut idx = level.head;
+            while idx != ARENA_NULL {
+                let node = self.arena.get(idx);
+                orders.push(node.to_order());
+                idx = node.next;
+            }
+        }
+
+        for level in self.bids.values().rev() {
+            let mut idx = level.head;
+            while idx != ARENA_NULL {
+                let node = self.arena.get(idx);
+                orders.push(node.to_order());
+                idx = node.next;
+            }
+        }
+
+        orders
+    }
+
     fn update_best_after_insert(&mut self, side: Side, price: i64) {
         match side {
             Side::Bid => {
@@ -394,6 +419,46 @@ mod tests {
         book.insert_order(bid(3, 102, 10, 3)).unwrap();
         assert_eq!(book.order_count(), 2);
         assert_eq!(book.best_bid(), Some(102));
+    }
+
+    #[test]
+    fn all_resting_orders_empty_book() {
+        let book = OrderBook::new();
+        assert!(book.all_resting_orders().is_empty());
+    }
+
+    #[test]
+    fn all_resting_orders_canonical_order() {
+        let mut book = OrderBook::with_capacity(16);
+        // Insert in mixed order
+        book.insert_order(bid(1, 100, 10, 1)).unwrap();
+        book.insert_order(ask(2, 110, 20, 2)).unwrap();
+        book.insert_order(bid(3, 102, 30, 3)).unwrap();
+        book.insert_order(ask(4, 108, 40, 4)).unwrap();
+        book.insert_order(bid(5, 100, 50, 5)).unwrap(); // same level as id=1
+
+        let orders = book.all_resting_orders();
+        assert_eq!(orders.len(), 5);
+
+        // Asks first, ascending price: 108 then 110
+        assert_eq!(orders[0].id, 4); // ask @ 108
+        assert_eq!(orders[1].id, 2); // ask @ 110
+
+        // Bids second, descending price: 102 then 100
+        assert_eq!(orders[2].id, 3); // bid @ 102
+        assert_eq!(orders[3].id, 1); // bid @ 100 (FIFO first)
+        assert_eq!(orders[4].id, 5); // bid @ 100 (FIFO second)
+    }
+
+    #[test]
+    fn all_resting_orders_reflects_partial_fills() {
+        let mut book = OrderBook::with_capacity(8);
+        book.insert_order(ask(1, 105, 100, 1)).unwrap();
+        book.reduce_front_quantity(Side::Ask, 105, 40).unwrap();
+
+        let orders = book.all_resting_orders();
+        assert_eq!(orders.len(), 1);
+        assert_eq!(orders[0].quantity, 60); // 100 - 40
     }
 
     #[test]
