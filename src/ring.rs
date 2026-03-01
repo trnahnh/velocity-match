@@ -78,11 +78,13 @@ impl<T> Drop for RingBufferInner<T> {
         // concurrent readers). Items in `tail..head` were written by the
         // producer and never read by the consumer, so they are initialized
         // and need dropping.
-        for i in tail..head {
+        let mut i = tail;
+        while i != head {
             unsafe {
                 let slot = &mut *self.buffer[i & self.mask].get();
                 slot.assume_init_drop();
             }
+            i = i.wrapping_add(1);
         }
     }
 }
