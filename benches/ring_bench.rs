@@ -53,7 +53,6 @@ fn bench_throughput(c: &mut Criterion) {
         });
     });
 
-    // Fair comparison: mpsc with try_recv spin loop (no blocking recv overhead)
     group.bench_function("std_mpsc_spin/1M", |b| {
         b.iter(|| {
             let (tx, rx) = std::sync::mpsc::channel::<u64>();

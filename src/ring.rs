@@ -5,10 +5,6 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-// ---------------------------------------------------------------------------
-// CachePadded — aligns T to a 64-byte cache line
-// ---------------------------------------------------------------------------
-
 #[repr(align(64))]
 pub struct CachePadded<T> {
     value: T,
@@ -33,10 +29,6 @@ impl<T> DerefMut for CachePadded<T> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Error types
-// ---------------------------------------------------------------------------
-
 /// Returned when pushing to a full ring buffer. Contains the rejected value.
 pub struct Full<T>(pub T);
 
@@ -50,16 +42,12 @@ impl<T> fmt::Debug for Full<T> {
 #[derive(Debug)]
 pub struct Empty;
 
-// ---------------------------------------------------------------------------
-// RingBufferInner — shared state between Producer and Consumer
-// ---------------------------------------------------------------------------
-
 struct RingBufferInner<T> {
     buffer: Box<[UnsafeCell<MaybeUninit<T>>]>,
     capacity: usize,
     mask: usize,
-    head: CachePadded<AtomicUsize>, // producer write cursor
-    tail: CachePadded<AtomicUsize>, // consumer read cursor
+    head: CachePadded<AtomicUsize>,
+    tail: CachePadded<AtomicUsize>,
 }
 
 // SAFETY: The SPSC protocol guarantees that only the Producer writes to slots
@@ -89,10 +77,6 @@ impl<T> Drop for RingBufferInner<T> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Producer
-// ---------------------------------------------------------------------------
-
 pub struct Producer<T> {
     inner: Arc<RingBufferInner<T>>,
     cached_head: usize,
@@ -110,9 +94,7 @@ impl<T> Producer<T> {
     pub fn push(&mut self, value: T) -> Result<(), Full<T>> {
         let head = self.cached_head;
 
-        // Fast path: check against locally cached tail
         if head.wrapping_sub(self.cached_tail) == self.inner.capacity {
-            // Slow path: reload tail from the atomic
             self.cached_tail = self.inner.tail.load(Ordering::Acquire);
             if head.wrapping_sub(self.cached_tail) == self.inner.capacity {
                 return Err(Full(value));
@@ -127,7 +109,6 @@ impl<T> Producer<T> {
             (*self.inner.buffer[head & self.inner.mask].get()).write(value);
         }
 
-        // Publish: make the written data visible to the consumer
         self.inner.head.store(head.wrapping_add(1), Ordering::Release);
         self.cached_head = head.wrapping_add(1);
 
@@ -139,10 +120,6 @@ impl<T> Producer<T> {
         self.inner.capacity
     }
 }
-
-// ---------------------------------------------------------------------------
-// Consumer
-// ---------------------------------------------------------------------------
 
 pub struct Consumer<T> {
     inner: Arc<RingBufferInner<T>>,
@@ -161,9 +138,7 @@ impl<T> Consumer<T> {
     pub fn pop(&mut self) -> Result<T, Empty> {
         let tail = self.cached_tail;
 
-        // Fast path: check against locally cached head
         if tail == self.cached_head {
-            // Slow path: reload head from the atomic
             self.cached_head = self.inner.head.load(Ordering::Acquire);
             if tail == self.cached_head {
                 return Err(Empty);
@@ -178,7 +153,6 @@ impl<T> Consumer<T> {
             (*self.inner.buffer[tail & self.inner.mask].get()).assume_init_read()
         };
 
-        // Release the slot: make our read completion visible to the producer
         self.inner.tail.store(tail.wrapping_add(1), Ordering::Release);
         self.cached_tail = tail.wrapping_add(1);
 
@@ -190,10 +164,6 @@ impl<T> Consumer<T> {
         self.inner.capacity
     }
 }
-
-// ---------------------------------------------------------------------------
-// Factory function
-// ---------------------------------------------------------------------------
 
 /// Creates a new SPSC ring buffer with the given capacity.
 ///
@@ -237,17 +207,11 @@ pub fn ring_buffer<T: Send>(capacity: usize) -> (Producer<T>, Consumer<T>) {
     (producer, consumer)
 }
 
-// ===========================================================================
-// Tests
-// ===========================================================================
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize as StdAtomicUsize;
     use std::thread;
-
-    // -- Single-threaded tests ---------------------------------------------
 
     #[test]
     fn push_pop_single() {
@@ -274,7 +238,7 @@ mod tests {
             p.push(i).unwrap();
         }
         let err = p.push(99).unwrap_err();
-        assert_eq!(err.0, 99); // value returned
+        assert_eq!(err.0, 99);
     }
 
     #[test]
@@ -286,7 +250,6 @@ mod tests {
     #[test]
     fn wraparound() {
         let (mut p, mut c) = ring_buffer::<u64>(4);
-        // Push/pop more than capacity to exercise wraparound
         for i in 0..100 {
             p.push(i).unwrap();
             assert_eq!(c.pop().unwrap(), i);
@@ -297,19 +260,16 @@ mod tests {
     fn fill_then_drain() {
         let (mut p, mut c) = ring_buffer::<u64>(8);
 
-        // Fill
         for i in 0..8 {
             p.push(i).unwrap();
         }
         assert!(p.push(99).is_err());
 
-        // Drain
         for i in 0..8 {
             assert_eq!(c.pop().unwrap(), i);
         }
         assert!(c.pop().is_err());
 
-        // Refill
         for i in 100..108 {
             p.push(i).unwrap();
         }
@@ -353,13 +313,10 @@ mod tests {
             p.push(DropCounter(Arc::clone(&drop_count))).unwrap();
             p.push(DropCounter(Arc::clone(&drop_count))).unwrap();
             p.push(DropCounter(Arc::clone(&drop_count))).unwrap();
-            // Drop without popping — RingBufferInner::drop should clean up
         }
 
         assert_eq!(drop_count.load(Ordering::Relaxed), 3);
     }
-
-    // -- Multi-threaded tests ----------------------------------------------
 
     #[test]
     fn concurrent_push_pop() {
@@ -389,7 +346,6 @@ mod tests {
 
         producer.join().unwrap();
 
-        // Verify FIFO order
         let expected: Vec<u64> = (0..count).collect();
         assert_eq!(received, expected);
     }
@@ -465,7 +421,6 @@ mod tests {
 
         producer.join().unwrap();
 
-        // Verify all orders received in FIFO order with correct fields
         for (i, order) in received.iter().enumerate() {
             let i = i as u64;
             assert_eq!(order.id, i);
