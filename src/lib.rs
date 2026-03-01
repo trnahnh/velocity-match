@@ -4,4 +4,7 @@ pub mod gateway;
 pub mod matching;
 pub mod order;
 pub mod protocol;
+pub(crate) mod recovery;
 pub mod ring;
+pub(crate) mod snapshot;
+pub(crate) mod wal;
