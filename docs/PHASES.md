@@ -52,7 +52,21 @@
 
 ---
 
-## Phase 3: Lock-Free Ring Buffer (Disruptor Pattern)
+## Phase 3: Sorted Price Levels
+
+**Objective**: Replace HashMap with BTreeMap for price levels, improving best-price recomputation from O(n) to O(log n).
+
+**Deliverables**:
+
+- `BTreeMap<i64, PriceLevel>` for bid/ask sides (sorted by price)
+- Best-price recomputation via `keys().next_back()` (bids) / `keys().next()` (asks)
+- Benchmark: cancel and matching improvements vs Phase 2
+
+**Status**: Complete.
+
+---
+
+## Phase 4: Lock-Free Ring Buffer (Disruptor Pattern)
 
 **Objective**: Implement single-producer single-consumer communication between the ingestion thread and the matching engine without locks or kernel involvement.
 
@@ -60,9 +74,9 @@
 
 - SPSC ring buffer using `AtomicUsize` for head/tail with `Acquire`/`Release` memory ordering
 - Pre-allocated fixed-size buffer (power-of-two capacity for fast modulo via bitmask)
-- Ingestion thread writes order messages; matching engine reads in a tight spin loop
+- Custom `CachePadded<T>` wrapper (`#[repr(align(64))]`, zero dependencies)
+- Local cursor caching to reduce cross-core atomic loads
 - Benchmark: ring buffer throughput/latency vs `std::sync::mpsc::channel`
-- Documentation explaining memory barrier choices and why this avoids context switches
 
 **Stack**:
 
@@ -71,14 +85,14 @@
 | Atomics | `std::sync::atomic::AtomicUsize` | Lock-free synchronization |
 | Memory Ordering | `Ordering::Acquire` / `Release` | Minimal barrier, correct visibility |
 | Buffer Layout | Power-of-2 array + bitmask | `index & (capacity - 1)` replaces modulo |
-| Padding | `crossbeam-utils::CachePadded` | Separate head/tail to different cache lines |
+| Padding | Custom `CachePadded` (`#[repr(align(64))]`) | Separate head/tail to different cache lines, zero deps |
 | Comparison Baseline | `std::sync::mpsc` | Show improvement over stdlib channel |
 
-**Architecture Note**: The matching engine runs single-threaded by design. The ring buffer is the only point of cross-thread communication. Single-threaded matching is faster than multi-threaded because it eliminates contention, cache invalidation, and context switching.
+**Status**: Complete.
 
 ---
 
-## Phase 4: Binary Protocol + UDP Networking
+## Phase 5: Binary Protocol + UDP Networking
 
 **Objective**: Replace text-based serialization with a zero-copy binary codec and broadcast trade execution reports over UDP multicast.
 
@@ -105,7 +119,7 @@
 
 ---
 
-## Phase 5: Persistence + Deterministic Replay
+## Phase 6: Persistence + Deterministic Replay
 
 **Objective**: Implement crash recovery through event sourcing. Every order is logged before processing, and the full book state can be recovered by replaying the log.
 
@@ -131,7 +145,7 @@
 
 ---
 
-## Phase 6: Benchmarking Suite + Observability
+## Phase 7: Benchmarking Suite + Observability
 
 **Objective**: Prove every performance claim with hard data. This is what goes at the top of the README and resume.
 

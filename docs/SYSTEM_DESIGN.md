@@ -193,7 +193,7 @@ struct Order { /* 64 bytes */ }
 
 Each `Order` occupies exactly one 64-byte cache line (x86_64). This prevents **false sharing**: when two threads access different `Order` objects that happen to share a cache line, the CPU would invalidate and reload the entire line on every write, destroying performance.
 
-The ring buffer's head and tail indices are also padded to separate cache lines using `crossbeam_utils::CachePadded<AtomicUsize>`.
+The ring buffer's head and tail indices are also padded to separate cache lines using a custom `CachePadded<AtomicUsize>` wrapper (`#[repr(align(64))]`, zero dependencies).
 
 ### 5.3 Memory Layout
 
