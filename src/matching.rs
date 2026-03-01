@@ -174,6 +174,18 @@ impl MatchingEngine {
     pub fn cancel_order(&mut self, order_id: u64) -> Result<Order, MatchingError> {
         Ok(self.book.cancel_order(order_id)?)
     }
+
+    /// Inserts directly into the book without matching (non-crossed snapshot state).
+    pub(crate) fn restore_from_orders(
+        orders: &[Order],
+        arena_capacity: u32,
+    ) -> Result<Self, MatchingError> {
+        let mut engine = Self::with_capacity(arena_capacity);
+        for order in orders {
+            engine.book.insert_order(order.clone())?;
+        }
+        Ok(engine)
+    }
 }
 
 impl Default for MatchingEngine {
@@ -429,6 +441,43 @@ mod tests {
 
         assert_eq!(engine.book().order_count(), 1);
         assert_eq!(engine.book().best_ask(), Some(101));
+    }
+
+    #[test]
+    fn restore_empty() {
+        let engine = MatchingEngine::restore_from_orders(&[], TEST_CAPACITY).unwrap();
+        assert_eq!(engine.book().order_count(), 0);
+        assert_eq!(engine.book().best_bid(), None);
+        assert_eq!(engine.book().best_ask(), None);
+    }
+
+    #[test]
+    fn restore_from_orders_rebuilds_book() {
+        let orders = vec![
+            ask(1, 105, 10, 1),
+            ask(2, 110, 20, 2),
+            bid(3, 100, 30, 3),
+            bid(4, 98, 40, 4),
+        ];
+
+        let engine = MatchingEngine::restore_from_orders(&orders, TEST_CAPACITY).unwrap();
+        assert_eq!(engine.book().order_count(), 4);
+        assert_eq!(engine.book().best_bid(), Some(100));
+        assert_eq!(engine.book().best_ask(), Some(105));
+    }
+
+    #[test]
+    fn restore_then_match() {
+        let orders = vec![ask(1, 100, 10, 1), ask(2, 101, 20, 2)];
+        let mut engine = MatchingEngine::restore_from_orders(&orders, TEST_CAPACITY).unwrap();
+
+        let result = engine.add_order(bid(3, 101, 15, 3)).unwrap();
+        assert_eq!(result.fills.len(), 2);
+        assert_eq!(result.fills[0].maker_order_id, 1);
+        assert_eq!(result.fills[0].quantity, 10);
+        assert_eq!(result.fills[1].maker_order_id, 2);
+        assert_eq!(result.fills[1].quantity, 5);
+        assert_eq!(result.status, OrderStatus::FullyFilled);
     }
 
     #[test]
