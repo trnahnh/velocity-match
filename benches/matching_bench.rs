@@ -106,28 +106,24 @@ fn bench_cancel(c: &mut Criterion) {
     }
 
     for &n in &[100, 500, 1_000] {
-        group.bench_with_input(
-            BenchmarkId::new("cancel_best_level", n),
-            &n,
-            |b, &n| {
-                b.iter_batched(
-                    || {
-                        let mut e = engine(n as u32 + 16);
-                        for i in 0..n {
-                            e.add_order(make_order(i + 1, Side::Bid, 1000 + i as i64, 10))
-                                .unwrap();
-                        }
-                        e
-                    },
-                    |mut engine| {
-                        for i in (0..n).rev() {
-                            engine.cancel_order(i + 1).unwrap();
-                        }
-                    },
-                    BatchSize::LargeInput,
-                );
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("cancel_best_level", n), &n, |b, &n| {
+            b.iter_batched(
+                || {
+                    let mut e = engine(n as u32 + 16);
+                    for i in 0..n {
+                        e.add_order(make_order(i + 1, Side::Bid, 1000 + i as i64, 10))
+                            .unwrap();
+                    }
+                    e
+                },
+                |mut engine| {
+                    for i in (0..n).rev() {
+                        engine.cancel_order(i + 1).unwrap();
+                    }
+                },
+                BatchSize::LargeInput,
+            );
+        });
     }
 
     group.bench_function("cancel_middle_of_1k", |b| {
