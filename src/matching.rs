@@ -392,15 +392,12 @@ mod tests {
     #[test]
     fn self_trade_prevented_cancel_newest() {
         let mut engine = engine();
-        // Trader 1 rests an ask
         engine.add_order(ask_trader(1, 1, 100, 10, 1)).unwrap();
 
-        // Same trader 1 sends a bid that would cross — taker cancelled
         let result = engine.add_order(bid_trader(2, 1, 100, 10, 2)).unwrap();
         assert_eq!(result.status, OrderStatus::CancelledSelfTrade);
         assert!(result.fills.is_empty());
 
-        // Resting ask is untouched
         assert_eq!(engine.book().order_count(), 1);
         assert_eq!(engine.book().best_ask(), Some(100));
     }
@@ -408,10 +405,8 @@ mod tests {
     #[test]
     fn self_trade_different_traders_allowed() {
         let mut engine = engine();
-        // Trader 1 rests an ask
         engine.add_order(ask_trader(1, 1, 100, 10, 1)).unwrap();
 
-        // Trader 2 sends a bid — should fill normally
         let result = engine.add_order(bid_trader(2, 2, 100, 10, 2)).unwrap();
         assert_eq!(result.status, OrderStatus::FullyFilled);
         assert_eq!(result.fills.len(), 1);
@@ -422,19 +417,16 @@ mod tests {
     #[test]
     fn self_trade_partial_fill_then_cancel() {
         let mut engine = engine();
-        // Trader A rests ask at 100
         engine.add_order(ask_trader(1, 10, 100, 5, 1)).unwrap();
-        // Trader B (self) rests ask at 101
         engine.add_order(ask_trader(2, 20, 101, 10, 2)).unwrap();
 
-        // Trader B sends bid at 101 — fills against trader A, then hits own order
+        // Fills against trader A, then hits own ask — cancelled
         let result = engine.add_order(bid_trader(3, 20, 101, 15, 3)).unwrap();
         assert_eq!(result.status, OrderStatus::CancelledSelfTrade);
         assert_eq!(result.fills.len(), 1);
         assert_eq!(result.fills[0].maker_order_id, 1);
         assert_eq!(result.fills[0].quantity, 5);
 
-        // Trader B's resting ask is still there
         assert_eq!(engine.book().order_count(), 1);
         assert_eq!(engine.book().best_ask(), Some(101));
     }
@@ -442,16 +434,13 @@ mod tests {
     #[test]
     fn self_trade_multiple_resting_same_trader() {
         let mut engine = engine();
-        // Trader 1 rests two asks
         engine.add_order(ask_trader(1, 1, 100, 10, 1)).unwrap();
         engine.add_order(ask_trader(2, 1, 101, 10, 2)).unwrap();
 
-        // Same trader 1 sends bid — cancelled on first encounter
         let result = engine.add_order(bid_trader(3, 1, 105, 30, 3)).unwrap();
         assert_eq!(result.status, OrderStatus::CancelledSelfTrade);
         assert!(result.fills.is_empty());
 
-        // Both resting asks untouched
         assert_eq!(engine.book().order_count(), 2);
     }
 }
@@ -480,7 +469,6 @@ mod proptests {
             taker_qty in 1_u64..=1000,
         ) {
             let mut engine = engine();
-            // Different trader_ids so STP doesn't trigger
             engine.add_order(Order::new(1, 1, Side::Ask, price, maker_qty, 1).unwrap()).unwrap();
 
             let result = engine.add_order(Order::new(2, 2, Side::Bid, price, taker_qty, 2).unwrap()).unwrap();
@@ -506,7 +494,6 @@ mod proptests {
             let mut engine = engine();
             for (i, (side, price, qty)) in orders.into_iter().enumerate() {
                 let id = (i + 1) as u64;
-                // Each order from a unique trader to avoid STP interference
                 let order = Order::new(id, id, side, price, qty, id).unwrap();
                 let _ = engine.add_order(order);
             }
@@ -523,7 +510,6 @@ mod proptests {
             taker_qty in 1_u64..=1000,
         ) {
             let mut engine = engine();
-            // Different trader_ids so STP doesn't trigger
             engine.add_order(Order::new(1, 1, Side::Ask, price, maker_qty, 1).unwrap()).unwrap();
 
             let result = engine.add_order(Order::new(2, 2, Side::Bid, price, taker_qty, 2).unwrap()).unwrap();
@@ -540,7 +526,6 @@ mod proptests {
             let mut engine = engine();
             for (i, (side, price, qty)) in orders.into_iter().enumerate() {
                 let id = (i + 1) as u64;
-                // Each order from a unique trader
                 let order = Order::new(id, id, side, price, qty, id).unwrap();
                 if let Ok(result) = engine.add_order(order) {
                     for fill in &result.fills {
@@ -557,12 +542,10 @@ mod proptests {
             taker_qty in 1_u64..=100,
         ) {
             let mut engine = engine();
-            // Same trader_id on both sides
             engine.add_order(Order::new(1, 42, Side::Ask, price, maker_qty, 1).unwrap()).unwrap();
 
             let result = engine.add_order(Order::new(2, 42, Side::Bid, price, taker_qty, 2).unwrap()).unwrap();
 
-            // No fills should have matching trader_ids (and here there should be no fills at all)
             prop_assert!(result.fills.is_empty(), "self-trade produced fills");
             prop_assert_eq!(result.status, OrderStatus::CancelledSelfTrade);
         }

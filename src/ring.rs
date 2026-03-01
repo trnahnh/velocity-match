@@ -29,7 +29,6 @@ impl<T> DerefMut for CachePadded<T> {
     }
 }
 
-/// Returned when pushing to a full ring buffer. Contains the rejected value.
 pub struct Full<T>(pub T);
 
 impl<T> fmt::Debug for Full<T> {
@@ -38,7 +37,6 @@ impl<T> fmt::Debug for Full<T> {
     }
 }
 
-/// Returned when popping from an empty ring buffer.
 #[derive(Debug)]
 pub struct Empty;
 
@@ -88,9 +86,6 @@ pub struct Producer<T> {
 unsafe impl<T: Send> Send for Producer<T> {}
 
 impl<T> Producer<T> {
-    /// Try to push a value into the ring buffer.
-    ///
-    /// Returns `Err(Full(value))` if the buffer is full.
     pub fn push(&mut self, value: T) -> Result<(), Full<T>> {
         let head = self.cached_head;
 
@@ -109,13 +104,14 @@ impl<T> Producer<T> {
             (*self.inner.buffer[head & self.inner.mask].get()).write(value);
         }
 
-        self.inner.head.store(head.wrapping_add(1), Ordering::Release);
+        self.inner
+            .head
+            .store(head.wrapping_add(1), Ordering::Release);
         self.cached_head = head.wrapping_add(1);
 
         Ok(())
     }
 
-    /// Returns the capacity of the ring buffer.
     pub fn capacity(&self) -> usize {
         self.inner.capacity
     }
@@ -132,9 +128,6 @@ pub struct Consumer<T> {
 unsafe impl<T: Send> Send for Consumer<T> {}
 
 impl<T> Consumer<T> {
-    /// Try to pop a value from the ring buffer.
-    ///
-    /// Returns `Err(Empty)` if the buffer is empty.
     pub fn pop(&mut self) -> Result<T, Empty> {
         let tail = self.cached_tail;
 
@@ -149,31 +142,27 @@ impl<T> Consumer<T> {
         // The slot was written by the producer (head has advanced past it).
         // The Acquire load of `head` above ensures the producer's write is
         // visible.
-        let value = unsafe {
-            (*self.inner.buffer[tail & self.inner.mask].get()).assume_init_read()
-        };
+        let value =
+            unsafe { (*self.inner.buffer[tail & self.inner.mask].get()).assume_init_read() };
 
-        self.inner.tail.store(tail.wrapping_add(1), Ordering::Release);
+        self.inner
+            .tail
+            .store(tail.wrapping_add(1), Ordering::Release);
         self.cached_tail = tail.wrapping_add(1);
 
         Ok(value)
     }
 
-    /// Returns the capacity of the ring buffer.
     pub fn capacity(&self) -> usize {
         self.inner.capacity
     }
 }
 
-/// Creates a new SPSC ring buffer with the given capacity.
-///
-/// Capacity must be a power of 2 and greater than zero.
-///
-/// # Panics
-///
-/// Panics if `capacity` is zero or not a power of two.
 pub fn ring_buffer<T: Send>(capacity: usize) -> (Producer<T>, Consumer<T>) {
-    assert!(capacity > 0, "ring buffer capacity must be greater than zero");
+    assert!(
+        capacity > 0,
+        "ring buffer capacity must be greater than zero"
+    );
     assert!(
         capacity.is_power_of_two(),
         "ring buffer capacity must be a power of two, got {capacity}"
@@ -425,10 +414,7 @@ mod tests {
             let i = i as u64;
             assert_eq!(order.id, i);
             assert_eq!(order.trader_id, i % 100);
-            assert_eq!(
-                order.side,
-                if i % 2 == 0 { Side::Bid } else { Side::Ask }
-            );
+            assert_eq!(order.side, if i % 2 == 0 { Side::Bid } else { Side::Ask });
             assert_eq!(order.price, 10_000 + (i as i64 % 500));
             assert_eq!(order.quantity, (i % 1000) + 1);
             assert_eq!(order.timestamp, i * 1000);
