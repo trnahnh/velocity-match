@@ -53,6 +53,24 @@ fn bench_throughput(c: &mut Criterion) {
         });
     });
 
+    // Fair comparison: mpsc with try_recv spin loop (no blocking recv overhead)
+    group.bench_function("std_mpsc_spin/1M", |b| {
+        b.iter(|| {
+            let (tx, rx) = std::sync::mpsc::channel::<u64>();
+            let producer = thread::spawn(move || {
+                for i in 0..count {
+                    tx.send(i).unwrap();
+                }
+            });
+            for _ in 0..count {
+                while rx.try_recv().is_err() {
+                    std::hint::spin_loop();
+                }
+            }
+            producer.join().unwrap();
+        });
+    });
+
     group.bench_function("spsc_ring_order/1M", |b| {
         b.iter(|| {
             let (mut p, mut c) = ring_buffer::<Order>(8192);
@@ -83,6 +101,24 @@ fn bench_throughput(c: &mut Criterion) {
             });
             for _ in 0..count {
                 rx.recv().unwrap();
+            }
+            producer.join().unwrap();
+        });
+    });
+
+    // Fair comparison: mpsc with try_recv spin loop (no blocking recv overhead)
+    group.bench_function("std_mpsc_spin_order/1M", |b| {
+        b.iter(|| {
+            let (tx, rx) = std::sync::mpsc::channel::<Order>();
+            let producer = thread::spawn(move || {
+                for i in 0..count {
+                    tx.send(make_order(i)).unwrap();
+                }
+            });
+            for _ in 0..count {
+                while rx.try_recv().is_err() {
+                    std::hint::spin_loop();
+                }
             }
             producer.join().unwrap();
         });

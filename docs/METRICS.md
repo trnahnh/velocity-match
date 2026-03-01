@@ -121,19 +121,22 @@ Slight regression due to BTreeMap node allocation on new price level creation (n
 
 ### Throughput (1M items, 2 threads)
 
-| Benchmark | SPSC Ring | std::sync::mpsc | Speedup |
-| --- | --- | --- | --- |
-| u64 / 1M | 1.92 ms | 18.43 ms | **9.6x** |
-| Order (48B) / 1M | 5.57 ms | 21.49 ms | **3.9x** |
+| Benchmark | SPSC Ring | mpsc (recv) | mpsc (try_recv spin) | Speedup vs best mpsc |
+| --- | --- | --- | --- | --- |
+| u64 / 1M | 1.85 ms | 16.35 ms | 20.04 ms | **8.8x** |
+| Order (48B) / 1M | 5.51 ms | 20.03 ms | 24.10 ms | **3.6x** |
 
-SPSC ring buffer: ~520M u64 ops/sec, ~180M Order ops/sec.
-std::sync::mpsc: ~54M u64 ops/sec, ~47M Order ops/sec.
+SPSC ring buffer: ~540M u64 ops/sec, ~182M Order ops/sec.
+std::sync::mpsc (blocking recv): ~61M u64 ops/sec, ~50M Order ops/sec.
+std::sync::mpsc (try_recv spin): ~50M u64 ops/sec, ~41M Order ops/sec — spin variant is *slower* than blocking, likely due to `try_recv` lock overhead under contention.
+
+Note: `std::sync::mpsc` is a multi-producer channel (extra synchronization overhead vs our single-producer design). Both benchmarks include thread spawn/join in the measured iteration.
 
 ### Latency (single-thread, push 1 / pop 1)
 
 | Benchmark | Time |
 | --- | --- |
-| push_pop_alternating | 2.13 ns/op |
+| push_pop_alternating | 2.11 ns/op |
 
 ### Design
 
