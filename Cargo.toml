@@ -16,3 +16,6 @@ harness = false
 [[bench]]
 name = "ring_bench"
 harness = false
+
+[[example]]
+name = "subscriber"
