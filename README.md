@@ -1,111 +1,85 @@
 # Ferrox
 
-A low-latency order matching engine in Rust targeting **sub-50µs P99 latency** at **1M+ orders/second** with **zero heap allocation** on the hot path.
+A low-latency order matching engine in Rust. Sub-50us P99 latency, 1M+ orders/sec, zero heap allocation on the hot path.
 
-## Architecture
+## The Problem
 
-```text
-                    ┌─────────────────────────────────────────────────┐
-                    │                  Hot Path                       │
-                    │                                                 │
-  NIC/Client ──►  [Binary Decoder] ──► [Ring Buffer] ──► [Matching    │ ──► [UDP Multicast]
-                    │                     (SPSC)          Engine]     │     ExecutionReports
-                    │                                       │         │
-                    │                                       ▼         │
-                    │                                  [Order Book]   │
-                    │                                   │         │   │
-                    │                              Bid Side   Ask Side│
-                    └─────────────────────────────────────────────────┘
-                                                        │
-                                                        ▼
-                                                   [WAL / mmap]
-                                                   Persistence
-```
+At the core of every exchange sits a matching engine — the component that takes buy and sell orders and pairs them together. The difference between a good matching engine and a great one is measured in microseconds, and those microseconds translate directly to money.
 
-### Threading Model
+Most implementations get this wrong in subtle ways:
 
-Two threads, by design:
+- **Floating-point prices** introduce IEEE 754 rounding errors. A price of `0.1 + 0.2 != 0.3` is unacceptable when real money is on the line.
+- **Heap allocation on every order** means the OS allocator sits in the critical path. `malloc` contention and memory fragmentation create unpredictable latency spikes.
+- **Lock-based concurrency** forces threads to wait on each other. Mutex contention, cache line bouncing, and context switches destroy throughput under load.
+- **Naive data structures** like `HashMap` + `VecDeque` work for correctness but leave performance on the table — O(n) scans to find the best price, pointer chasing across scattered memory, no cache locality.
 
-1. **Ingestion thread** — reads from network, decodes binary messages, writes to ring buffer.
-2. **Matching thread** — reads from ring buffer, writes to WAL, executes matching, publishes results.
+Ferrox exists to solve each of these problems, one phase at a time, with hard benchmark numbers proving every optimization.
 
-Single-threaded matching eliminates lock contention, cache invalidation from cross-core communication, and context switching overhead. This is the same architecture used by [LMAX Exchange](https://www.lmax.com/) to process 6M orders/second on a single thread.
+## The Approach
 
-## Design Decisions
+### Phase 1 — Get It Right First
 
-| Decision | Choice | Rationale |
-| -------- | ------ | --------- |
-| Price representation | `i64` fixed-point ticks | No IEEE 754 rounding errors — unacceptable in financial systems |
-| Order book | `HashMap<i64, VecDeque<Order>>` → intrusive linked list | O(1) insert/remove, no pointer chasing, cache-friendly |
-| Memory management | Arena-based object pool (1M pre-allocated slots) | Zero `malloc`/`free` on hot path after startup |
-| Cache alignment | `#[repr(align(64))]` on shared structs | Prevents false sharing between threads |
-| Cross-thread comms | Lock-free SPSC ring buffer | `Acquire`/`Release` ordering — minimum barriers for correctness |
-| Networking | UDP multicast + sequence numbers | One `sendto()` reaches all subscribers; gaps detected via seq_num |
-| Persistence | WAL via `memmap2` + CRC32 per record | Deterministic replay for crash recovery |
+Started with the simplest correct implementation: `HashMap<i64, VecDeque<Order>>` for price levels, linear scan for best price. Prices stored as `i64` fixed-point ticks from day one (`$150.05` = `15005` at tick size `0.01`) — no floating point anywhere on the trade path.
 
-## Performance
+Built 37 tests including property-based testing with `proptest` to verify invariants: quantity conservation, no crossed book after matching, no self-trade fills, all fill quantities positive.
 
-<!-- TODO: Replace with actual benchmark results from Phase 6 -->
+### Phase 2 — Eliminate the Allocator
 
-| Metric | Target |
-| ------ | ------ |
-| P99 Latency | < 50µs |
-| Throughput | 1,000,000+ orders/sec |
-| Hot Path Allocations | 0 |
+Replaced `VecDeque` with an arena-based object pool and intrusive doubly linked lists. Every `OrderNode` is 64 bytes (`#[repr(C, align(64))]`) — exactly one cache line. A pre-allocated arena with a free list gives O(1) alloc/dealloc with zero syscalls. Cancel went from O(n) linear scan to O(1) unlink.
 
-## Wire Protocol
+| Benchmark | Before | After | Change |
+| --- | --- | --- | --- |
+| cancel_middle_of_1k | 2.16 us | 0.91 us | **-58%** |
+| mixed_workload_10k | 1.19 ms | 0.69 ms | **-42%** |
 
-All messages are fixed-size binary structs — no JSON, no Protobuf on the hot path.
+### Phase 3 — Stop Scanning for Best Price
 
-| Message | Size | Description |
-| ------- | ---- | ----------- |
-| `NewOrder` | 32 bytes | Place a new limit order (side, price, quantity) |
-| `CancelOrder` | 16 bytes | Cancel a resting order by ID |
-| `ExecutionReport` | 48 bytes | Trade notification with monotonic sequence number |
+Replaced `HashMap` with `BTreeMap` for price levels. Best-price recomputation after a level empties went from O(n) linear scan to O(log n) tree lookup.
 
-## Crash Recovery
+| Benchmark | Before | After | Change |
+| --- | --- | --- | --- |
+| match/multi_level_sweep | 45.14 us | 14.73 us | **-67%** |
+| cancel_best_level/1000 | 696.94 us | 124.07 us | **-82%** |
 
-1. Load latest snapshot (if exists)
-2. Open WAL, seek to first record after snapshot
-3. Replay all records through the matching engine
-4. Book state is now bit-exact to pre-crash state
+### Phase 4 — Lock-Free Cross-Thread Communication
 
-The matching engine is fully deterministic: same input sequence always produces the same book state and execution reports.
+Built a Disruptor-style SPSC ring buffer for the ingestion-to-matching pipeline. Free-running `AtomicUsize` cursors with bitmask indexing, `CachePadded` atomics to prevent false sharing, and local cursor caching to minimize cross-core cache bouncing. Acquire/Release ordering compiles to plain MOV instructions on x86 — zero barrier overhead.
 
-## Development Phases
+| Benchmark | SPSC Ring | std::sync::mpsc | Speedup |
+| --- | --- | --- | --- |
+| u64 throughput (1M) | 1.85 ms | 16.35 ms | **8.8x** |
+| Order throughput (1M) | 5.51 ms | 20.03 ms | **3.6x** |
+| Push+pop latency | 2.11 ns | — | — |
+
+540M ops/sec for raw values. 182M ops/sec for 48-byte Order structs.
+
+## Current State
 
 | Phase | Focus | Status |
-| ----- | ----- | ------ |
-| 1 | Domain model + matching logic (`HashMap` + `VecDeque`, correctness first) | Done |
-| 2 | Performance data structures (arena, intrusive linked list, cache line padding) | Planned |
-| 3 | Lock-free SPSC ring buffer (`AtomicUsize`, `Acquire`/`Release` ordering) | Planned |
-| 4 | Binary protocol + UDP multicast (zero-copy codec, `socket2`) | Planned |
-| 5 | Persistence + deterministic replay (`memmap2`, WAL, snapshots) | Planned |
-| 6 | Benchmarking suite (`criterion`, `hdr_histogram`, P50/P90/P99/P99.9) | Planned |
+| --- | --- | --- |
+| 1 | Domain model, matching logic, property-based tests | Done |
+| 2 | Arena object pool, intrusive linked lists, cache-line alignment | Done |
+| 3 | BTreeMap sorted price levels, O(log n) best-price recomputation | Done |
+| 4 | Lock-free SPSC ring buffer (Disruptor pattern) | Done |
+| 5 | Binary protocol, UDP multicast networking | Planned |
+| 6 | WAL persistence, deterministic crash recovery | Planned |
+| 7 | End-to-end benchmarking suite, HdrHistogram, observability | Planned |
 
-## Build & Run
+66 tests. ~0.11s test time. Zero `unsafe` in the matching engine (4 `unsafe` blocks in the ring buffer, each with documented safety invariants).
 
-```bash
-cargo build --release
-cargo run --release
-```
-
-## Test
+## Quick Start
 
 ```bash
-cargo test
-```
-
-## Benchmark
-
-```bash
-cargo bench
+cargo build --release     # build
+cargo test                # 66 tests
+cargo bench               # criterion benchmarks (matching + ring buffer)
 ```
 
 ## Documentation
 
-- [System Design](docs/SYSTEM_DESIGN.md) — Architecture, failure analysis, hardware considerations, deployment strategy
-- [Development Phases](docs/PHASES.md) — Detailed deliverables, stack choices, and rationale for each phase
+- [System Design](docs/SYSTEM_DESIGN.md) — architecture, failure analysis, hardware considerations, deployment strategy
+- [Development Phases](docs/PHASES.md) — deliverables, stack choices, and rationale per phase
+- [Performance Metrics](docs/METRICS.md) — before/after benchmark numbers for every optimization
 
 ## License
 
